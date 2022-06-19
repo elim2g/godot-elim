@@ -963,7 +963,9 @@ Ref<KinematicCollision> KinematicBody::_move(const Vector3 &p_motion, bool p_inf
 	bool collided = move_and_collide(p_motion, p_infinite_inertia, col, p_exclude_raycast_shapes, p_test_only);
 
 	// Don't report collision when the whole motion is done.
-	if (collided && col.collision_safe_fraction < 1) {
+	//if (collided && col.collision_safe_fraction < 1) {
+	// elim - Removed latter half of the conditional because it's breaking everything
+	if (collided) {
 		// Create a new instance when the cached reference is invalid or still in use in script.
 		if (motion_cache.is_null() || motion_cache->reference_get_count() > 1) {
 			motion_cache.instance();
