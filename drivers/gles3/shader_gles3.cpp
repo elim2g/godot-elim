@@ -189,7 +189,33 @@ bool ShaderGLES3::_bind_ubershader() {
 	ERR_FAIL_COND_V(conditionals_uniform == -1, false);
 #endif
 	new_conditional_version.version &= ~VersionKey::UBERSHADER_FLAG;
-	glUniform1ui(conditionals_uniform, new_conditional_version.version);
+#ifdef DEV_ENABLED
+	// So far we don't need bit 31 for conditionals. That allows us to use signed integers,
+	// which are more compatible across GL driver vendors.
+	CRASH_COND(new_conditional_version.version >= 0x80000000);
+#endif
+	glUniform1i(conditionals_uniform, new_conditional_version.version);
+
+	// This is done to avoid running into the GL UB message id 131222. Long explanation:
+	// If an ubershader has shadow samplers, they are generally not used if the current material has shadowing disabled,
+	// but that also implies the rasterizer won't do any preparation to the relevant shadow samplers (which won't really exist,
+	// so that's the correct way in a conditioned shader).
+	// However, in the case of the ubershader those shadow samplers are unconditionally declared, although potentially unused and
+	// thus "uninitialized". Sampling in that situation (compare disabled, no depth texture bound) is undefined behavior for GL.
+	// And that's a problem for us because, even if dynamic branching will serve to avoid using the unprepared sampler when shadowing
+	// is not enabled, the GPU may still run the other branch. And it's not just that the results from the sampling are undefined
+	// (that wouldn't be a problem and we could just ignore the warning); the problem is that sampling in that state is fully UB.
+	for (int i = 0; i < shadow_texunit_count; i++) {
+		int unit = shadow_texunits[i];
+		if (unit >= 0) {
+			glActiveTexture(GL_TEXTURE0 + unit);
+		} else {
+			glActiveTexture(GL_TEXTURE0 + max_image_units + unit);
+		}
+		glBindTexture(GL_TEXTURE_2D, depth_tex);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+	}
+
 	return bound;
 }
 
@@ -499,11 +525,11 @@ static CharString _prepare_ubershader_chunk(const CharString &p_chunk) {
 			} else if (l.begins_with("#ifdef")) {
 				Vector<String> pieces = l.split_spaces();
 				CRASH_COND(pieces.size() != 2);
-				s += "if ((ubershader_flags & FLAG_" + pieces[1] + ") != 0u) {\n";
+				s += "if ((ubershader_flags & FLAG_" + pieces[1] + ") != 0) {\n";
 			} else if (l.begins_with("#ifndef")) {
 				Vector<String> pieces = l.split_spaces();
 				CRASH_COND(pieces.size() != 2);
-				s += "if ((ubershader_flags & FLAG_" + pieces[1] + ") == 0u) {\n";
+				s += "if ((ubershader_flags & FLAG_" + pieces[1] + ") == 0) {\n";
 			} else {
 				CRASH_NOW_MSG("The shader template is using too complex syntax in a line marked with ubershader-runtime.");
 			}
@@ -577,7 +603,7 @@ ShaderGLES3::Version *ShaderGLES3::get_current_version(bool &r_async_forbidden) 
 	if (build_ubershader) {
 		strings_common.push_back("#define IS_UBERSHADER\n");
 		for (int i = 0; i < conditional_count; i++) {
-			String s = vformat("#define FLAG_%s (1u << %du)\n", String(conditional_defines[i]).strip_edges().trim_prefix("#define "), i);
+			String s = vformat("#define FLAG_%s (1 << %d)\n", String(conditional_defines[i]).strip_edges().trim_prefix("#define "), i);
 			CharString cs = s.ascii();
 			flag_macros.push_back(cs);
 			strings_common.push_back(cs.ptr());
@@ -1102,7 +1128,7 @@ GLint ShaderGLES3::get_uniform_location(const String &p_name) const {
 	return glGetUniformLocation(version->ids.main, p_name.ascii().get_data());
 }
 
-void ShaderGLES3::setup(const char **p_conditional_defines, int p_conditional_count, const char **p_uniform_names, int p_uniform_count, const AttributePair *p_attribute_pairs, int p_attribute_count, const TexUnitPair *p_texunit_pairs, int p_texunit_pair_count, const UBOPair *p_ubo_pairs, int p_ubo_pair_count, const Feedback *p_feedback, int p_feedback_count, const char *p_vertex_code, const char *p_fragment_code, int p_vertex_code_start, int p_fragment_code_start) {
+void ShaderGLES3::setup(const char **p_conditional_defines, int p_conditional_count, const char **p_uniform_names, int p_uniform_count, const AttributePair *p_attribute_pairs, int p_attribute_count, const TexUnitPair *p_texunit_pairs, int p_texunit_pair_count, const int *p_shadow_texunits, int p_shadow_texunit_count, const UBOPair *p_ubo_pairs, int p_ubo_pair_count, const Feedback *p_feedback, int p_feedback_count, const char *p_vertex_code, const char *p_fragment_code, int p_vertex_code_start, int p_fragment_code_start) {
 	ERR_FAIL_COND(version);
 	conditional_version.key = 0;
 	new_conditional_version.key = 0;
@@ -1114,6 +1140,8 @@ void ShaderGLES3::setup(const char **p_conditional_defines, int p_conditional_co
 	fragment_code = p_fragment_code;
 	texunit_pairs = p_texunit_pairs;
 	texunit_pair_count = p_texunit_pair_count;
+	shadow_texunits = p_shadow_texunits;
+	shadow_texunit_count = p_shadow_texunit_count;
 	vertex_code_start = p_vertex_code_start;
 	fragment_code_start = p_fragment_code_start;
 	attribute_pairs = p_attribute_pairs;
@@ -1204,7 +1232,8 @@ void ShaderGLES3::setup(const char **p_conditional_defines, int p_conditional_co
 	glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &max_image_units);
 }
 
-void ShaderGLES3::init_async_compilation() {
+void ShaderGLES3::init_async_compilation(GLuint p_depth_tex) {
+	depth_tex = p_depth_tex;
 	if (is_async_compilation_supported() && get_ubershader_flags_uniform() != -1) {
 		// Warm up the ubershader for the case of no custom code
 		new_conditional_version.code_version = 0;

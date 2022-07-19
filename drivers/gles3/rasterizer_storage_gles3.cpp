@@ -34,6 +34,7 @@
 #include "core/os/os.h"
 #include "core/project_settings.h"
 #include "core/threaded_callable_queue.h"
+#include "main/main.h"
 #include "rasterizer_canvas_gles3.h"
 #include "rasterizer_scene_gles3.h"
 #include "servers/visual_server.h"
@@ -8071,6 +8072,13 @@ void RasterizerStorageGLES3::initialize() {
 	config.texture_float_linear_supported = config.extensions.has("GL_OES_texture_float_linear");
 	config.framebuffer_float_supported = config.extensions.has("GL_EXT_color_buffer_float");
 	config.framebuffer_half_float_supported = config.extensions.has("GL_EXT_color_buffer_half_float") || config.framebuffer_float_supported;
+
+	// If the desktop build is using S3TC, and you export / run from the IDE for android, if the device supports
+	// S3TC it will crash trying to load these textures, as they are not exported in the APK. This is a simple way
+	// to prevent Android devices trying to load S3TC, by faking lack of hardware support.
+#if defined(ANDROID_ENABLED) || defined(IPHONE_ENABLED)
+	config.s3tc_supported = false;
+#endif
 #endif
 
 	// not yet detected on GLES3 (is this mandated?)
@@ -8098,7 +8106,10 @@ void RasterizerStorageGLES3::initialize() {
 	config.parallel_shader_compile_supported = config.extensions.has("GL_KHR_parallel_shader_compile") || config.extensions.has("GL_ARB_parallel_shader_compile");
 #endif
 
-	const int compilation_mode = ProjectSettings::get_singleton()->get("rendering/gles3/shaders/shader_compilation_mode");
+	int compilation_mode = 0;
+	if (!(Engine::get_singleton()->is_editor_hint() || Main::is_project_manager())) {
+		compilation_mode = ProjectSettings::get_singleton()->get("rendering/gles3/shaders/shader_compilation_mode");
+	}
 	config.async_compilation_enabled = compilation_mode >= 1;
 	config.shader_cache_enabled = compilation_mode == 2;
 
@@ -8237,6 +8248,14 @@ void RasterizerStorageGLES3::initialize() {
 		glGenerateMipmap(GL_TEXTURE_2D);
 		glBindTexture(GL_TEXTURE_2D, 0);
 
+		glGenTextures(1, &resources.depth_tex);
+		unsigned char depthtexdata[8 * 8 * 2] = {};
+
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, resources.depth_tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, 8, 8, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, depthtexdata);
+		glBindTexture(GL_TEXTURE_2D, 0);
+
 		glGenTextures(1, &resources.white_tex_3d);
 
 		glActiveTexture(GL_TEXTURE0);
@@ -8327,7 +8346,7 @@ void RasterizerStorageGLES3::initialize() {
 	shaders.cubemap_filter.set_conditional(CubemapFilterShaderGLES3::LOW_QUALITY, !ggx_hq);
 	shaders.particles.init();
 	if (config.async_compilation_enabled) {
-		shaders.particles.init_async_compilation();
+		shaders.particles.init_async_compilation(resources.depth_tex);
 	}
 
 #ifdef GLES_OVER_GL
@@ -8385,6 +8404,7 @@ void RasterizerStorageGLES3::finalize() {
 	glDeleteTextures(1, &resources.white_tex);
 	glDeleteTextures(1, &resources.black_tex);
 	glDeleteTextures(1, &resources.normal_tex);
+	glDeleteTextures(1, &resources.depth_tex);
 }
 
 void RasterizerStorageGLES3::update_dirty_resources() {

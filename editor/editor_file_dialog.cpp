@@ -704,9 +704,9 @@ void EditorFileDialog::update_file_name() {
 		String base_name = file_str.get_basename();
 		Vector<String> filter_substr = filter_str.split(";");
 		if (filter_substr.size() >= 2) {
-			file_str = base_name + "." + filter_substr[0].strip_edges().lstrip("*.").to_lower();
+			file_str = base_name + "." + filter_substr[0].strip_edges().get_extension().to_lower();
 		} else {
-			file_str = base_name + "." + filter_str.get_extension().strip_edges().to_lower();
+			file_str = base_name + "." + filter_str.strip_edges().get_extension().to_lower();
 		}
 		file->set_text(file_str);
 	}
@@ -1687,6 +1687,7 @@ EditorFileDialog::EditorFileDialog() {
 	file = memnew(LineEdit);
 	file->set_stretch_ratio(4);
 	file->set_h_size_flags(SIZE_EXPAND_FILL);
+	file->set_deselect_on_focus_loss_enabled(false);
 	file_box->add_child(file);
 	filter = memnew(OptionButton);
 	filter->set_stretch_ratio(3);
