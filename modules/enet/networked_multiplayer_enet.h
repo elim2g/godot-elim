@@ -72,6 +72,13 @@ private:
 	int transfer_channel;
 	int channel_count;
 	bool always_ordered;
+	// ELIM BEGIN
+	int last_poll_ticks;
+	int last_used_total_data_sent;
+	int last_used_total_data_received;
+	int bandwidth_sent_over_last_second;
+	int bandwidth_received_over_last_second;
+	// ELIM END
 
 	ENetEvent event;
 	ENetPeer *peer;
@@ -167,6 +174,12 @@ public:
 	bool is_always_ordered() const;
 	void set_server_relay_enabled(bool p_enabled);
 	bool is_server_relay_enabled() const;
+	// ELIM BEGIN
+	int get_total_sent_bandwidth() const;
+	int get_total_received_bandwidth() const;
+	int get_sent_bandwidth_per_second() const;
+	int get_received_bandwidth_per_second() const;
+	// ELIM END
 
 	NetworkedMultiplayerENet();
 	~NetworkedMultiplayerENet();

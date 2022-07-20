@@ -224,6 +224,23 @@ void NetworkedMultiplayerENet::poll() {
 	ENetEvent event;
 	int ret = enet_host_service(host, &event, 0);
 
+	// ELIM BEGIN
+	// Update bandwidth stats
+	uint32_t current_ticks = OS::get_singleton()->get_ticks_msec();
+	if (current_ticks - last_poll_ticks >= 1000) {
+		last_poll_ticks = current_ticks;
+
+		int total_sent = get_total_sent_bandwidth();
+		int total_recv = get_total_received_bandwidth();
+
+		bandwidth_sent_over_last_second = total_sent - last_used_total_data_sent;
+		bandwidth_received_over_last_second = total_recv - last_used_total_data_received;
+
+		last_used_total_data_sent = total_sent;
+		last_used_total_data_received = total_recv;
+	}
+	// ELIM END
+
 	if (ret < 0) {
 		ERR_FAIL_MSG("Enet host service error");
 	} else if (ret == 0) {
@@ -849,6 +866,32 @@ bool NetworkedMultiplayerENet::is_server_relay_enabled() const {
 	return server_relay;
 }
 
+// ELIM BEGIN
+int NetworkedMultiplayerENet::get_total_sent_bandwidth() const {
+	if (host) {
+		return host->totalSentData;
+	}
+
+	return 0;
+}
+
+int NetworkedMultiplayerENet::get_total_received_bandwidth() const {
+	if (host) {
+		return host->totalReceivedData;
+	}
+
+	return 0;
+}
+
+int NetworkedMultiplayerENet::get_sent_bandwidth_per_second() const {
+	return bandwidth_sent_over_last_second;
+}
+
+int NetworkedMultiplayerENet::get_received_bandwidth_per_second() const {
+	return bandwidth_received_over_last_second;
+}
+// ELIM END
+
 void NetworkedMultiplayerENet::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("create_server", "port", "max_clients", "in_bandwidth", "out_bandwidth"), &NetworkedMultiplayerENet::create_server, DEFVAL(32), DEFVAL(0), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("create_client", "address", "port", "in_bandwidth", "out_bandwidth", "client_port"), &NetworkedMultiplayerENet::create_client, DEFVAL(0), DEFVAL(0), DEFVAL(0));
@@ -879,6 +922,12 @@ void NetworkedMultiplayerENet::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_always_ordered"), &NetworkedMultiplayerENet::is_always_ordered);
 	ClassDB::bind_method(D_METHOD("set_server_relay_enabled", "enabled"), &NetworkedMultiplayerENet::set_server_relay_enabled);
 	ClassDB::bind_method(D_METHOD("is_server_relay_enabled"), &NetworkedMultiplayerENet::is_server_relay_enabled);
+	// ELIM BEGIN
+	ClassDB::bind_method(D_METHOD("get_total_sent_bandwidth"), &NetworkedMultiplayerENet::get_total_sent_bandwidth);
+	ClassDB::bind_method(D_METHOD("get_total_received_bandwidth"), &NetworkedMultiplayerENet::get_total_received_bandwidth);
+	ClassDB::bind_method(D_METHOD("get_sent_bandwidth_per_second"), &NetworkedMultiplayerENet::get_sent_bandwidth_per_second);
+	ClassDB::bind_method(D_METHOD("get_received_bandwidth_per_second"), &NetworkedMultiplayerENet::get_received_bandwidth_per_second);
+	// ELIM END
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "compression_mode", PROPERTY_HINT_ENUM, "None,Range Coder,FastLZ,ZLib,ZStd"), "set_compression_mode", "get_compression_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "transfer_channel"), "set_transfer_channel", "get_transfer_channel");
@@ -908,6 +957,13 @@ NetworkedMultiplayerENet::NetworkedMultiplayerENet() {
 	channel_count = SYSCH_MAX;
 	transfer_channel = -1;
 	always_ordered = false;
+	// ELIM BEGIN
+	last_poll_ticks = 0;
+	last_used_total_data_sent = 0;
+	last_used_total_data_received = 0;
+	bandwidth_sent_over_last_second = 0;
+	bandwidth_received_over_last_second = 0;
+	// ELIM END
 	connection_status = CONNECTION_DISCONNECTED;
 	compression_mode = COMPRESS_RANGE_CODER;
 	enet_compressor.context = this;
