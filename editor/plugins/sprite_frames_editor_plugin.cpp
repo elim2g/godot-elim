@@ -1,32 +1,32 @@
-/*************************************************************************/
-/*  sprite_frames_editor_plugin.cpp                                      */
-/*************************************************************************/
-/*                       This file is part of:                           */
-/*                           GODOT ENGINE                                */
-/*                      https://godotengine.org                          */
-/*************************************************************************/
-/* Copyright (c) 2007-2022 Juan Linietsky, Ariel Manzur.                 */
-/* Copyright (c) 2014-2022 Godot Engine contributors (cf. AUTHORS.md).   */
-/*                                                                       */
-/* Permission is hereby granted, free of charge, to any person obtaining */
-/* a copy of this software and associated documentation files (the       */
-/* "Software"), to deal in the Software without restriction, including   */
-/* without limitation the rights to use, copy, modify, merge, publish,   */
-/* distribute, sublicense, and/or sell copies of the Software, and to    */
-/* permit persons to whom the Software is furnished to do so, subject to */
-/* the following conditions:                                             */
-/*                                                                       */
-/* The above copyright notice and this permission notice shall be        */
-/* included in all copies or substantial portions of the Software.       */
-/*                                                                       */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,       */
-/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF    */
-/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.*/
-/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY  */
-/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,  */
-/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE     */
-/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                */
-/*************************************************************************/
+/**************************************************************************/
+/*  sprite_frames_editor_plugin.cpp                                       */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
 
 #include "sprite_frames_editor_plugin.h"
 
@@ -67,14 +67,18 @@ int SpriteFramesEditor::_sheet_preview_position_to_frame_index(const Point2 &p_p
 	const Size2i block_size = frame_size + separation;
 	const Point2i position = p_position / sheet_zoom - offset;
 
-	if (position.x % block_size.x > frame_size.x || position.y % block_size.y > frame_size.y) {
+	if (position.x < 0 || position.y < 0) {
+		return -1; // Out of bounds.
+	}
+
+	if (position.x % block_size.x >= frame_size.x || position.y % block_size.y >= frame_size.y) {
 		return -1; // Gap between frames.
 	}
 
 	const Point2i frame = position / block_size;
 	const Size2i frame_count = _get_frame_count();
-	if (frame.x < 0 || frame.y < 0 || frame.x >= frame_count.x || frame.y >= frame_count.y) {
-		return -1; // Out of bound.
+	if (frame.x >= frame_count.x || frame.y >= frame_count.y) {
+		return -1; // Out of bounds.
 	}
 
 	return frame_count.x * frame.y + frame.x;
@@ -172,7 +176,7 @@ void SpriteFramesEditor::_sheet_preview_input(const Ref<InputEvent> &p_event) {
 				// Prevent double-toggling the same frame when moving the mouse when the mouse button is still held.
 				frames_toggled_by_mouse_hover.insert(idx);
 
-				if (mb->get_control()) {
+				if (frames_selected.has(idx)) {
 					frames_selected.erase(idx);
 				} else {
 					frames_selected.insert(idx);
@@ -745,9 +749,13 @@ void SpriteFramesEditor::_animation_name_edited() {
 	undo_redo->add_undo_method(frames, "rename_animation", name, edited_anim);
 
 	for (List<Node *>::Element *E = nodes.front(); E; E = E->next()) {
-		String current = E->get()->call("get_animation");
+		StringName current = E->get()->call("get_animation");
+		if (current != edited_anim) {
+			continue;
+		}
+
 		undo_redo->add_do_method(E->get(), "set_animation", name);
-		undo_redo->add_undo_method(E->get(), "set_animation", edited_anim);
+		undo_redo->add_undo_method(E->get(), "set_animation", current);
 	}
 
 	undo_redo->add_do_method(this, "_update_library");
@@ -775,8 +783,14 @@ void SpriteFramesEditor::_animation_add() {
 	undo_redo->add_do_method(this, "_update_library");
 	undo_redo->add_undo_method(this, "_update_library");
 
+	// Assign the newly added animation to the edited anim sprite and to all other anim sprites having invalid animation.
+	Object *edited_anim_sprite = EditorNode::get_singleton()->get_inspector()->get_edited_object();
 	for (List<Node *>::Element *E = nodes.front(); E; E = E->next()) {
-		String current = E->get()->call("get_animation");
+		StringName current = E->get()->call("get_animation");
+		if (frames->has_animation(current) && E->get() != edited_anim_sprite) {
+			continue;
+		}
+
 		undo_redo->add_do_method(E->get(), "set_animation", name);
 		undo_redo->add_undo_method(E->get(), "set_animation", current);
 	}
@@ -811,10 +825,35 @@ void SpriteFramesEditor::_animation_remove_confirmed() {
 		Ref<Texture> frame = frames->get_frame(edited_anim, i);
 		undo_redo->add_undo_method(frames, "add_frame", edited_anim, frame);
 	}
+
+	StringName new_edited_anim = StringName();
+
+	List<StringName> anim_names;
+	frames->get_animation_list(&anim_names);
+	anim_names.sort_custom<StringName::AlphCompare>();
+
+	// If removing not the last animation, make the first animation left the new edited one.
+	if (anim_names.size() > 1) {
+		new_edited_anim = edited_anim != anim_names.front()->get() ? anim_names.front()->get() : anim_names.front()->next()->get();
+
+		List<Node *> nodes;
+		_find_anim_sprites(EditorNode::get_singleton()->get_edited_scene(), &nodes, Ref<SpriteFrames>(frames));
+
+		for (List<Node *>::Element *E = nodes.front(); E; E = E->next()) {
+			StringName current = E->get()->call("get_animation");
+			if (current != edited_anim) {
+				continue;
+			}
+
+			undo_redo->add_do_method(E->get(), "set_animation", new_edited_anim);
+			undo_redo->add_undo_method(E->get(), "set_animation", current);
+		}
+	}
+
 	undo_redo->add_do_method(this, "_update_library");
 	undo_redo->add_undo_method(this, "_update_library");
 
-	edited_anim = StringName();
+	edited_anim = new_edited_anim;
 
 	undo_redo->commit_action();
 }

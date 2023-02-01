@@ -1,32 +1,32 @@
-/*************************************************************************/
-/*  input_default.cpp                                                    */
-/*************************************************************************/
-/*                       This file is part of:                           */
-/*                           GODOT ENGINE                                */
-/*                      https://godotengine.org                          */
-/*************************************************************************/
-/* Copyright (c) 2007-2022 Juan Linietsky, Ariel Manzur.                 */
-/* Copyright (c) 2014-2022 Godot Engine contributors (cf. AUTHORS.md).   */
-/*                                                                       */
-/* Permission is hereby granted, free of charge, to any person obtaining */
-/* a copy of this software and associated documentation files (the       */
-/* "Software"), to deal in the Software without restriction, including   */
-/* without limitation the rights to use, copy, modify, merge, publish,   */
-/* distribute, sublicense, and/or sell copies of the Software, and to    */
-/* permit persons to whom the Software is furnished to do so, subject to */
-/* the following conditions:                                             */
-/*                                                                       */
-/* The above copyright notice and this permission notice shall be        */
-/* included in all copies or substantial portions of the Software.       */
-/*                                                                       */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,       */
-/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF    */
-/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.*/
-/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY  */
-/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,  */
-/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE     */
-/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                */
-/*************************************************************************/
+/**************************************************************************/
+/*  input_default.cpp                                                     */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
 
 #include "input_default.h"
 
@@ -607,6 +607,8 @@ void InputDefault::action_press(const StringName &p_action, float p_strength) {
 	action.idle_frame = Engine::get_singleton()->get_idle_frames();
 	action.pressed = true;
 	action.strength = p_strength;
+	action.raw_strength = p_strength;
+	action.exact = true;
 
 	action_state[p_action] = action;
 }
@@ -618,6 +620,8 @@ void InputDefault::action_release(const StringName &p_action) {
 	action.idle_frame = Engine::get_singleton()->get_idle_frames();
 	action.pressed = false;
 	action.strength = 0.f;
+	action.raw_strength = 0.f;
+	action.exact = true;
 
 	action_state[p_action] = action;
 }
@@ -841,11 +845,9 @@ void InputDefault::joy_axis(int p_device, int p_axis, float p_value) {
 		}
 
 		bool pressed = map.value > 0.5;
-		if (pressed == joy_buttons_pressed.has(_combine_device(map.index, p_device))) {
-			// Button already pressed or released; so ignore.
-			return;
+		if (pressed != joy_buttons_pressed.has(_combine_device(map.index, p_device))) {
+			_button_event(p_device, map.index, pressed);
 		}
-		_button_event(p_device, map.index, pressed);
 
 		// Ensure opposite D-Pad button is also released.
 		switch (map.index) {
@@ -992,7 +994,7 @@ InputDefault::JoyEvent InputDefault::_get_mapped_axis_event(const JoyDeviceMappi
 				value = -value;
 			}
 			if (binding.input.axis.range == FULL_AXIS ||
-					(binding.input.axis.range == POSITIVE_HALF_AXIS && value > 0) ||
+					(binding.input.axis.range == POSITIVE_HALF_AXIS && value >= 0) ||
 					(binding.input.axis.range == NEGATIVE_HALF_AXIS && value < 0)) {
 				event.type = binding.outputType;
 				float shifted_positive_value = 0;
@@ -1050,7 +1052,7 @@ InputDefault::JoyEvent InputDefault::_get_mapped_axis_event(const JoyDeviceMappi
 	return event;
 }
 
-void InputDefault::_get_mapped_hat_events(const JoyDeviceMapping &mapping, int p_hat, JoyEvent r_events[]) {
+void InputDefault::_get_mapped_hat_events(const JoyDeviceMapping &mapping, int p_hat, JoyEvent r_events[(size_t)HAT_MAX]) {
 	for (int i = 0; i < mapping.bindings.size(); i++) {
 		const JoyBinding binding = mapping.bindings[i];
 		if (binding.inputType == TYPE_HAT && binding.input.hat.hat == p_hat) {

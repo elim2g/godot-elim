@@ -25,6 +25,8 @@
 #ifndef NANOSVGRAST_H
 #define NANOSVGRAST_H
 
+#include "nanosvg.h"
+
 #ifndef NANOSVGRAST_CPLUSPLUS
 #ifdef __cplusplus
 extern "C" {
@@ -47,7 +49,7 @@ typedef struct NSVGrasterizer NSVGrasterizer;
 */
 
 // Allocated rasterizer context.
-NSVGrasterizer* nsvgCreateRasterizer();
+NSVGrasterizer* nsvgCreateRasterizer(void);
 
 // Rasterizes SVG image, returns RGBA image (non-premultiplied alpha)
 //   r - pointer to rasterizer context
@@ -71,8 +73,6 @@ void nsvgDeleteRasterizer(NSVGrasterizer*);
 }
 #endif
 #endif
-
-#endif // NANOSVGRAST_H
 
 #ifdef NANOSVGRAST_IMPLEMENTATION
 
@@ -150,7 +150,7 @@ struct NSVGrasterizer
 	int width, height, stride;
 };
 
-NSVGrasterizer* nsvgCreateRasterizer()
+NSVGrasterizer* nsvgCreateRasterizer(void)
 {
 	NSVGrasterizer* r = (NSVGrasterizer*)malloc(sizeof(NSVGrasterizer));
 	if (r == NULL) goto error;
@@ -1453,4 +1453,6 @@ void nsvgRasterize(NSVGrasterizer* r,
 	r->stride = 0;
 }
 
-#endif
+#endif // NANOSVGRAST_IMPLEMENTATION
+
+#endif // NANOSVGRAST_H

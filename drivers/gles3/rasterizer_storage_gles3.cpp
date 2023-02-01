@@ -1,32 +1,32 @@
-/*************************************************************************/
-/*  rasterizer_storage_gles3.cpp                                         */
-/*************************************************************************/
-/*                       This file is part of:                           */
-/*                           GODOT ENGINE                                */
-/*                      https://godotengine.org                          */
-/*************************************************************************/
-/* Copyright (c) 2007-2022 Juan Linietsky, Ariel Manzur.                 */
-/* Copyright (c) 2014-2022 Godot Engine contributors (cf. AUTHORS.md).   */
-/*                                                                       */
-/* Permission is hereby granted, free of charge, to any person obtaining */
-/* a copy of this software and associated documentation files (the       */
-/* "Software"), to deal in the Software without restriction, including   */
-/* without limitation the rights to use, copy, modify, merge, publish,   */
-/* distribute, sublicense, and/or sell copies of the Software, and to    */
-/* permit persons to whom the Software is furnished to do so, subject to */
-/* the following conditions:                                             */
-/*                                                                       */
-/* The above copyright notice and this permission notice shall be        */
-/* included in all copies or substantial portions of the Software.       */
-/*                                                                       */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,       */
-/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF    */
-/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.*/
-/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY  */
-/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,  */
-/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE     */
-/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                */
-/*************************************************************************/
+/**************************************************************************/
+/*  rasterizer_storage_gles3.cpp                                          */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
 
 #include "rasterizer_storage_gles3.h"
 
@@ -2460,6 +2460,8 @@ void RasterizerStorageGLES3::shader_get_param_list(RID p_shader, List<PropertyIn
 				pi.hint = PROPERTY_HINT_RESOURCE_TYPE;
 				pi.hint_string = "CubeMap";
 			} break;
+			default: {
+			}
 		};
 
 		p_param_list->push_back(pi);
@@ -5277,6 +5279,8 @@ void RasterizerStorageGLES3::skeleton_bone_set_transform_2d(RID p_skeleton, int 
 	if (!skeleton->update_list.in_list()) {
 		skeleton_update_list.add(&skeleton->update_list);
 	}
+
+	skeleton->revision++;
 }
 Transform2D RasterizerStorageGLES3::skeleton_bone_get_transform_2d(RID p_skeleton, int p_bone) const {
 	Skeleton *skeleton = skeleton_owner.getornull(p_skeleton);
@@ -5308,6 +5312,12 @@ void RasterizerStorageGLES3::skeleton_set_base_transform_2d(RID p_skeleton, cons
 	ERR_FAIL_COND(!skeleton->use_2d);
 
 	skeleton->base_transform_2d = p_base_transform;
+}
+
+uint32_t RasterizerStorageGLES3::skeleton_get_revision(RID p_skeleton) const {
+	const Skeleton *skeleton = skeleton_owner.getornull(p_skeleton);
+	ERR_FAIL_COND_V(!skeleton, 0);
+	return skeleton->revision;
 }
 
 void RasterizerStorageGLES3::update_dirty_skeletons() {
@@ -8346,7 +8356,7 @@ void RasterizerStorageGLES3::initialize() {
 	shaders.cubemap_filter.set_conditional(CubemapFilterShaderGLES3::LOW_QUALITY, !ggx_hq);
 	shaders.particles.init();
 	if (config.async_compilation_enabled) {
-		shaders.particles.init_async_compilation(resources.depth_tex);
+		shaders.particles.init_async_compilation();
 	}
 
 #ifdef GLES_OVER_GL
