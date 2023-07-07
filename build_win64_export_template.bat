@@ -1,0 +1,1 @@
+scons -j24 platform=windows tools=no bits=64 target=release
