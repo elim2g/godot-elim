@@ -365,3 +365,6 @@ $RECYCLE.BIN/
 *.lnk
 Godot.app
 osx_template.app
+osx_tools.app
+osx_tools.app
+osx.zip
