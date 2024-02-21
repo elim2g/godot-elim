@@ -2,19 +2,18 @@
 #define TURNT_PHYSICS_H
 
 #include "core/reference.h"
-#include "physics_body.h"
 
 class GroundDetectResult : public Reference
 {
     GDCLASS(GroundDetectResult, Reference);
 
 public:
+    GroundDetectResult()
+        : m_ground_normal(Vector3(0.0f, 1.0f, 0.0f))
+        , m_is_on_ground(false) {}
     GroundDetectResult(Vector3 in_ground_normal, bool in_is_on_ground)
         : m_ground_normal(in_ground_normal)
         , m_is_on_ground(in_is_on_ground) {}
-    GroundDetectResult(const GroundDetectResult &gdr)
-        : m_ground_normal(gdr.m_ground_normal)
-        , m_is_on_ground(gdr.m_is_on_ground) {}
 
     Vector3 get_ground_normal() const { return m_ground_normal; }
     bool get_is_on_ground() const { return m_is_on_ground; }
@@ -33,22 +32,21 @@ protected:
 
 
 
-class TurntPhysics : public Reference
+class TurntPhysics : public Object
 {
-    GDCLASS(TurntPhysics, Reference);
+    GDCLASS(TurntPhysics, Object);
 
 public:
-    TurntPhysics() = default;
+    TurntPhysics();
+    ~TurntPhysics();
 
-    static GroundDetectResult check_player_on_ground(KinematicBody* in_player, const float in_down_dist);
-    static bool normal_is_ground(const Vector3& in_normal);
+    static TurntPhysics* get_singleton();
+
+    Ref<GroundDetectResult> check_player_on_ground(Object* in_player, const float in_down_dist);
+    bool normal_is_ground(const Vector3& in_normal);
 
 protected:
-    static void _bind_methods()
-    {
-        ClassDB::bind_method(D_METHOD("check_player_on_ground", "in_player"), &TurntPhysics::check_player_on_ground);
-        ClassDB::bind_method(D_METHOD("normal_is_ground", "in_normal"), &TurntPhysics::normal_is_ground);
-    }
+    static void _bind_methods();
 };
 
 #endif // TURNT_PHYSICS_H
