@@ -3,6 +3,5 @@
 
 void register_turnt_types();
 void unregister_turnt_types();
-void register_turnt_singletons();
 
 #endif // REGISTER_TURNT_TYPES

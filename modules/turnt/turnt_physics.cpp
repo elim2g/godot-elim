@@ -1,24 +1,24 @@
 #include "turnt_physics.h"
 #include "scene/3d/physics_body.h"
 
-static TurntPhysics* singleton = nullptr;
+/*static*/ _TurntPhysics* _TurntPhysics::singleton = nullptr;
 
-TurntPhysics::TurntPhysics()
+_TurntPhysics::_TurntPhysics()
 {
     singleton = this;
 }
 
-TurntPhysics::~TurntPhysics()
+_TurntPhysics::~_TurntPhysics()
 {
     singleton = nullptr;
 }
 
-/*static*/ TurntPhysics* TurntPhysics::get_singleton()
+/*static*/ _TurntPhysics* _TurntPhysics::get_singleton()
 {
     return singleton;
 }
 
-Ref<GroundDetectResult> TurntPhysics::check_player_on_ground(Object* in_player, const float in_down_dist)
+Ref<GroundDetectResult> _TurntPhysics::check_player_on_ground(Object* in_player, const float in_down_dist)
 {
     Ref<GroundDetectResult> gdr = memnew(GroundDetectResult());
 
@@ -57,8 +57,8 @@ Ref<GroundDetectResult> TurntPhysics::check_player_on_ground(Object* in_player, 
                     save_pos_first_collision.z
                 );
 
-                gdr->m_ground_normal = col.normal;
-                gdr->m_is_on_ground = true;
+                gdr->ground_normal = col.normal;
+                gdr->is_on_ground = true;
 
                 return gdr;
             }
@@ -80,13 +80,13 @@ Ref<GroundDetectResult> TurntPhysics::check_player_on_ground(Object* in_player, 
     return gdr;
 }
 
-bool TurntPhysics::normal_is_ground(const Vector3& in_normal)
+bool _TurntPhysics::normal_is_ground(const Vector3& in_normal)
 {
     return in_normal.y >= 0.7f;
 }
 
-/*static*/ void TurntPhysics::_bind_methods()
+/*static*/ void _TurntPhysics::_bind_methods()
 {
-    ClassDB::bind_method(D_METHOD("check_player_on_ground", "in_player", "in_down_dist"), &TurntPhysics::check_player_on_ground);
-    ClassDB::bind_method(D_METHOD("normal_is_ground", "in_normal"), &TurntPhysics::normal_is_ground);
+    ClassDB::bind_method(D_METHOD("check_player_on_ground", "in_player", "in_down_dist"), &_TurntPhysics::check_player_on_ground);
+    ClassDB::bind_method(D_METHOD("normal_is_ground", "in_normal"), &_TurntPhysics::normal_is_ground);
 }
