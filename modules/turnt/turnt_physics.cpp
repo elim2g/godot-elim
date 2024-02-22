@@ -51,11 +51,11 @@ Ref<GroundDetectResult> _TurntPhysics::check_player_on_ground(Object* in_player,
             // We have found ground :)
             if (normal_is_ground(col.normal))
             {
-                player->get_global_transform().origin = Vector3(
+                player->set_global_translation(Vector3(
                     save_pos_first_collision.x,
                     save_pos_first_collision.y + (in_down_dist * 0.25f),
                     save_pos_first_collision.z
-                );
+                ));
 
                 gdr->ground_normal = col.normal;
                 gdr->is_on_ground = true;
@@ -76,7 +76,8 @@ Ref<GroundDetectResult> _TurntPhysics::check_player_on_ground(Object* in_player,
     }
 
     // If we make it this far we have not detected any ground :(
-    player->get_global_transform().origin = save_pos;
+    player->set_global_translation(save_pos);
+
     return gdr;
 }
 
