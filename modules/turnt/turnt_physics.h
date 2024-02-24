@@ -48,6 +48,7 @@ public:
 
     Ref<GroundDetectResult> check_player_on_ground(Object* in_player, const float in_down_dist);
     bool normal_is_ground(const Vector3& in_normal);
+    Vector3 slide_keep_xz_velocity(const Vector3 &in_velocity, const Vector3 &in_normal);
 
 protected:
     static void _bind_methods();

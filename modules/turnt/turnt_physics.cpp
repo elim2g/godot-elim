@@ -86,8 +86,26 @@ bool _TurntPhysics::normal_is_ground(const Vector3& in_normal)
     return in_normal.y >= 0.7f;
 }
 
+Vector3 _TurntPhysics::slide_keep_xz_velocity(const Vector3 &in_velocity, const Vector3 &in_normal)
+{
+    const Vector3 slide_velocity = in_velocity.slide(in_normal);
+    float slide_xy_len = Vector3(slide_velocity.x, 0.0f, slide_velocity.y).length();
+
+    if (!Math::is_zero_approx(slide_xy_len))
+    {
+        return Vector3(
+            in_velocity.x,
+            slide_velocity.y * (Vector3(in_velocity.x, 0.0f, in_velocity.z).length() / slide_xy_len),
+            in_velocity.z
+        );
+    }
+
+    return slide_velocity;
+}
+
 /*static*/ void _TurntPhysics::_bind_methods()
 {
     ClassDB::bind_method(D_METHOD("check_player_on_ground", "in_player", "in_down_dist"), &_TurntPhysics::check_player_on_ground);
     ClassDB::bind_method(D_METHOD("normal_is_ground", "in_normal"), &_TurntPhysics::normal_is_ground);
+    ClassDB::bind_method(D_METHOD("slide_keep_xz_velocity", "in_velocity", "in_normal"), &_TurntPhysics::slide_keep_xz_velocity);
 }
