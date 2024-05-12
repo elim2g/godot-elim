@@ -4,6 +4,12 @@
 #include "core/object.h"
 #include "turnt_globals.h"
 
+#include "tnt_macros.h"
+#ifdef TNT_CLASS_NAME
+#undef TNT_CLASS_NAME
+#endif
+#define TNT_CLASS_NAME TurntPhysicsParams
+
 class TurntPhysicsParams : public Object
 {
     GDCLASS(TurntPhysicsParams, Object);
@@ -22,203 +28,70 @@ public:
 public:
     _TurntGlobals::E_PHYSICS_PRESET m_physics_preset;
 
-    float m_step_height;
-    float m_step_y_norm_range;
+    TNTPROP_GS(float, step_height);
+    TNTPROP_GS(float, step_y_norm_range);
 
-    float m_ground_accel;
-    float m_ground_speed;
-    float m_ground_accel_slick;
-    float m_ground_speed_slick;
-    float m_ground_detect_dist;
-    float m_friction;
-    float m_stop_speed;
-    float m_crouch_accel;
-    float m_crouch_speed;
+    TNTPROP_GS(float, ground_accel);
+    TNTPROP_GS(float, ground_speed);
+    TNTPROP_GS(float, ground_accel_slick);
+    TNTPROP_GS(float, ground_speed_slick);
+    TNTPROP_GS(float, ground_detect_dist);
+    TNTPROP_GS(float, friction);
+    TNTPROP_GS(float, stop_speed);
+    TNTPROP_GS(float, crouch_accel);
+    TNTPROP_GS(float, crouch_speed);
 
-    float m_slope_y_max;
-    float m_slope_peel;
-    float m_slope_slide_peel;
+    TNTPROP_GS(float, slope_y_max);
+    TNTPROP_GS(float, slope_peel);
+    TNTPROP_GS(float, slope_slide_peel);
 
-    bool m_cpm_air_control_enabled;
-    float m_cpm_air_control_strength;
-    float m_cpm_air_accel;
-    float m_cpm_air_speed;
-    float m_air_accel;
-    float m_air_speed;
+    TNTPROP_GS(bool, cpm_air_control_enabled);
+    TNTPROP_GS(float, cpm_air_control_strength);
+    TNTPROP_GS(float, cpm_air_accel);
+    TNTPROP_GS(float, cpm_air_speed);
+    TNTPROP_GS(float, air_accel);
+    TNTPROP_GS(float, air_speed);
+                    
+    TNTPROP_GS(float, gravity);
+    TNTPROP_GS(float, jump_velocity);
+    TNTPROP_GS(float, jump_dj_time_sec);
+    TNTPROP_GS(float, jump_dj_xplier);
 
-    float m_gravity;
-    float m_jump_velocity;
-    float m_jump_dj_time_sec;
-    float m_jump_dj_xplier;
+    TNTPROP_GS(bool, crouch_slide_enabled);
+    TNTPROP_GS(float, crouch_slide_speed);
+    TNTPROP_GS(float, crouch_slide_accel);
+    TNTPROP_GS(float, crouch_slide_max_duration);
+    TNTPROP_GS(float, crouch_slide_transition_lenience);
+    TNTPROP_GS(float, crouch_slide_hangtime_req_sec);
+    TNTPROP_GS(float, crouch_slide_efficiency_scalar);
+    TNTPROP_GS(float, crouch_slide_ground_detect_dist);
+    TNTPROP_GS(float, crouch_slide_downramp_gravity_scale);
+    TNTPROP_GS(float, crouch_slide_upramp_gravity_scale);
 
-    bool m_crouch_slide_enabled;
-    float m_crouch_slide_speed;
-    float m_crouch_slide_accel;
-    float m_crouch_slide_max_duration;
-    float m_crouch_slide_transition_lenience;
-    float m_crouch_slide_hangtime_req_sec;
-    float m_crouch_slide_efficiency_scalar;
-    float m_crouch_slide_ground_detect_dist;
-    float m_crouch_slide_downramp_gravity_scale;
-    float m_crouch_slide_upramp_gravity_scale;
+    TNTPROP_GS(float, skim_time_sec);
 
-    float m_skim_time_sec;
+    TNTPROP_GS(bool, ramp_slides);
+    TNTPROP_GS(float, ramp_slide_vel_req);
+    TNTPROP_GS(float, ramp_slide_slope_y_min);
+    TNTPROP_GS(float, ramp_slide_slope_y_max);
 
-    bool m_ramp_slides;
-    float m_ramp_slide_vel_req;
-    float m_ramp_slide_slope_y_min;
-    float m_ramp_slide_slope_y_max;
+    TNTPROP_GS(bool, pwup_haste_enabled);
+    TNTPROP_GS(float, pwup_haste_xplier);
 
-    bool m_pwup_haste_enabled;
-    float m_pwup_haste_xplier;
+    TNTPROP_GS(float, wep_rl_cooldown);
+    TNTPROP_GS(float, wep_rl_velocity);
+    TNTPROP_GS(float, wep_rl_splash_min_dist);
+    TNTPROP_GS(float, wep_rl_splash_max_dist);
+    TNTPROP_GS(float, wep_rl_splash_min_impulse);
+    TNTPROP_GS(float, wep_rl_splash_max_impulse);
+    TNTPROP_GS(float, wep_projectile_initial_distance);
 
-    float m_wep_rl_cooldown;
-    float m_wep_rl_velocity;
-    float m_wep_rl_splash_min_dist;
-    float m_wep_rl_splash_max_dist;
-    float m_wep_rl_splash_min_impulse;
-    float m_wep_rl_splash_max_impulse;
-    float m_wep_projectile_initial_distance;
+    TNTPROP_GS(bool, prac_mode_enabled);
+    TNTPROP_GS(bool, prac_spawn_rl);
 
-    bool m_prac_mode_enabled;
-    bool m_prac_spawn_rl;
-
-    float m_ground_check_min_speed;
-    float m_step_y_min_height;
-    float m_ramp_slide_vel_req_squared;
-
-public:
-    // Getters
-    float get_step_height() const;
-    float get_step_y_norm_range() const;
-
-    float get_ground_accel() const;
-    float get_ground_speed() const;
-    float get_ground_accel_slick() const;
-    float get_ground_speed_slick() const;
-    float get_ground_detect_dist() const;
-    float get_friction() const;
-    float get_stop_speed() const;
-    float get_crouch_accel() const;
-    float get_crouch_speed() const;
-
-    float get_slope_y_max() const;
-    float get_slope_peel() const;
-    float get_slope_slide_peel() const;
-
-    bool get_cpm_air_control_enabled() const;
-    float get_cpm_air_control_strength() const;
-    float get_cpm_air_accel() const;
-    float get_cpm_air_speed() const;
-    float get_air_accel() const;
-    float get_air_speed() const;
-
-    float get_gravity() const;
-    float get_jump_velocity() const;
-    float get_jump_dj_time_sec() const;
-    float get_jump_dj_xplier() const;
-
-    bool get_crouch_slide_enabled() const;
-    float get_crouch_slide_speed() const;
-    float get_crouch_slide_accel() const;
-    float get_crouch_slide_max_duration() const;
-    float get_crouch_slide_transition_lenience() const;
-    float get_crouch_slide_hangtime_req_sec() const;
-    float get_crouch_slide_efficiency_scalar() const;
-    float get_crouch_slide_ground_detect_dist() const;
-    float get_crouch_slide_downramp_gravity_scale() const;
-    float get_crouch_slide_upramp_gravity_scale() const;
-
-    float get_skim_time_sec() const;
-
-    bool get_ramp_slides() const;
-    float get_ramp_slide_vel_req() const;
-    float get_ramp_slide_slope_y_min() const;
-    float get_ramp_slide_slope_y_max() const;
-
-    bool get_pwup_haste_enabled() const;
-    float get_pwup_haste_xplier() const;
-
-    float get_wep_rl_cooldown() const;
-    float get_wep_rl_velocity() const;
-    float get_wep_rl_splash_min_dist() const;
-    float get_wep_rl_splash_max_dist() const;
-    float get_wep_rl_splash_min_impulse() const;
-    float get_wep_rl_splash_max_impulse() const;
-    float get_wep_projectile_initial_distance() const;
-
-    bool get_prac_mode_enabled() const;
-    bool get_prac_spawn_rl() const;
-
-    float get_ground_check_min_speed() const;
-    float get_step_y_min_height() const;
-    float get_ramp_slide_vel_req_squared() const;
-
-    // Setters
-    void set_step_height(const float value);
-    void set_step_y_norm_range(const float value);
-
-    void set_ground_accel(const float value);
-    void set_ground_speed(const float value);
-    void set_ground_accel_slick(const float value);
-    void set_ground_speed_slick(const float value);
-    void set_ground_detect_dist(const float value);
-    void set_friction(const float value);
-    void set_stop_speed(const float value);
-    void set_crouch_accel(const float value);
-    void set_crouch_speed(const float value);
-
-    void set_slope_y_max(const float value);
-    void set_slope_peel(const float value);
-    void set_slope_slide_peel(const float value);
-
-    void set_cpm_air_control_enabled(const bool enabled);
-    void set_cpm_air_control_strength(const float value);
-    void set_cpm_air_accel(const float value);
-    void set_cpm_air_speed(const float value);
-    void set_air_accel(const float value);
-    void set_air_speed(const float value);
-
-    void set_gravity(const float value);
-    void set_jump_velocity(const float value);
-    void set_jump_dj_time_sec(const float value);
-    void set_jump_dj_xplier(const float value);
-
-    void set_crouch_slide_enabled(const bool enabled);
-    void set_crouch_slide_speed(const float value);
-    void set_crouch_slide_accel(const float value);
-    void set_crouch_slide_max_duration(const float value);
-    void set_crouch_slide_transition_lenience(const float value);
-    void set_crouch_slide_hangtime_req_sec(const float value);
-    void set_crouch_slide_efficiency_scalar(const float value);
-    void set_crouch_slide_ground_detect_dist(const float value);
-    void set_crouch_slide_downramp_gravity_scale(const float value);
-    void set_crouch_slide_upramp_gravity_scale(const float value);
-
-    void set_skim_time_sec(const float value);
-
-    void set_ramp_slides(const bool enabled);
-    void set_ramp_slide_vel_req(const float value);
-    void set_ramp_slide_slope_y_min(const float value);
-    void set_ramp_slide_slope_y_max(const float value);
-
-    void set_pwup_haste_enabled(const bool enabled);
-    void set_pwup_haste_xplier(const float value);
-
-    void set_wep_rl_cooldown(const float value);
-    void set_wep_rl_velocity(const float value);
-    void set_wep_rl_splash_min_dist(const float value);
-    void set_wep_rl_splash_max_dist(const float value);
-    void set_wep_rl_splash_min_impulse(const float value);
-    void set_wep_rl_splash_max_impulse(const float value);
-    void set_wep_projectile_initial_distance(const float value);
-
-    void set_prac_mode_enabled(const bool enabled);
-    void set_prac_spawn_rl(const bool enabled);
-
-    void set_ground_check_min_speed(const float value);
-    void set_step_y_min_height(const float value);
-    void set_ramp_slide_vel_req_squared(const float value);
+    TNTPROP_GS(float, ground_check_min_speed);
+    TNTPROP_GS(float, step_y_min_height);
+    TNTPROP_GS(float, ramp_slide_vel_req_squared);
 
 public:
     bool normal_is_wall(const Vector3 &in_normal) const;
@@ -227,6 +100,75 @@ public:
     float gd2tnt_float(const float in_value) const;
     Vector2 gd2tnt_vec2(const Vector2 &in_value) const;
     Vector3 gd2tnt_vec3(const Vector3 &in_value) const;
+
+protected:
+    static void _bind_methods()
+    {
+        TNTADD_GS(REAL, step_height);
+        TNTADD_GS(REAL, step_y_norm_range);
+
+        TNTADD_GS(REAL, ground_accel);
+        TNTADD_GS(REAL, ground_speed);
+        TNTADD_GS(REAL, ground_accel_slick);
+        TNTADD_GS(REAL, ground_speed_slick);
+        TNTADD_GS(REAL, ground_detect_dist);
+        TNTADD_GS(REAL, friction);
+        TNTADD_GS(REAL, stop_speed);
+        TNTADD_GS(REAL, crouch_accel);
+        TNTADD_GS(REAL, crouch_speed);
+
+        TNTADD_GS(REAL, slope_y_max);
+        TNTADD_GS(REAL, slope_peel);
+        TNTADD_GS(REAL, slope_slide_peel);
+
+        TNTADD_GS(BOOL, cpm_air_control_enabled);
+        TNTADD_GS(REAL, cpm_air_control_strength);
+        TNTADD_GS(REAL, cpm_air_accel);
+        TNTADD_GS(REAL, cpm_air_speed);
+        TNTADD_GS(REAL, air_accel);
+        TNTADD_GS(REAL, air_speed);
+           
+        TNTADD_GS(REAL, gravity);
+        TNTADD_GS(REAL, jump_velocity);
+        TNTADD_GS(REAL, jump_dj_time_sec);
+        TNTADD_GS(REAL, jump_dj_xplier);
+
+        TNTADD_GS(BOOL, crouch_slide_enabled);
+        TNTADD_GS(REAL, crouch_slide_speed);
+        TNTADD_GS(REAL, crouch_slide_accel);
+        TNTADD_GS(REAL, crouch_slide_max_duration);
+        TNTADD_GS(REAL, crouch_slide_transition_lenience);
+        TNTADD_GS(REAL, crouch_slide_hangtime_req_sec);
+        TNTADD_GS(REAL, crouch_slide_efficiency_scalar);
+        TNTADD_GS(REAL, crouch_slide_ground_detect_dist);
+        TNTADD_GS(REAL, crouch_slide_downramp_gravity_scale);
+        TNTADD_GS(REAL, crouch_slide_upramp_gravity_scale);
+
+        TNTADD_GS(REAL, skim_time_sec);
+
+        TNTADD_GS(BOOL, ramp_slides);
+        TNTADD_GS(REAL, ramp_slide_vel_req);
+        TNTADD_GS(REAL, ramp_slide_slope_y_min);
+        TNTADD_GS(REAL, ramp_slide_slope_y_max);
+
+        TNTADD_GS(BOOL, pwup_haste_enabled);
+        TNTADD_GS(REAL, pwup_haste_xplier);
+
+        TNTADD_GS(REAL, wep_rl_cooldown);
+        TNTADD_GS(REAL, wep_rl_velocity);
+        TNTADD_GS(REAL, wep_rl_splash_min_dist);
+        TNTADD_GS(REAL, wep_rl_splash_max_dist);
+        TNTADD_GS(REAL, wep_rl_splash_min_impulse);
+        TNTADD_GS(REAL, wep_rl_splash_max_impulse);
+        TNTADD_GS(REAL, wep_projectile_initial_distance);
+
+        TNTADD_GS(BOOL, prac_mode_enabled);
+        TNTADD_GS(BOOL, prac_spawn_rl);
+
+        TNTADD_GS(REAL, ground_check_min_speed);
+        TNTADD_GS(REAL, step_y_min_height);
+        TNTADD_GS(REAL, ramp_slide_vel_req_squared);
+    }
 };
 
 #endif // TURNT_PHYSICS_PARAMS_H
