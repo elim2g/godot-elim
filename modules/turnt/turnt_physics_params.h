@@ -7,7 +7,7 @@
 #include "tnt_macros.h"
 #ifdef TNT_CLASS_NAME
 #undef TNT_CLASS_NAME
-#endif
+#endif // TNT_CLASS_NAME
 #define TNT_CLASS_NAME TurntPhysicsParams
 
 class TurntPhysicsParams : public Object
