@@ -9,16 +9,16 @@
 #define TNTPROP_GS(TYPE,NAME) TNTPROP_G(TYPE,NAME); \
                             void set_ ## NAME(const TYPE value) { m_ ## NAME = value; }
 
-#define TNTBIND_G(NAME) ClassDB::bind_method(D_METHOD("get_" #NAME), & ##TNT_CLASS_NAME::get_ ##NAME)
+#define TNTBIND_G(NAME) ClassDB::bind_method(D_METHOD("get_" #NAME), & ##TNT_CLASS_NAME::get_ ## NAME)
 
-#define TNTBIND_GS(NAME) TNTBIND_G(NAME); \ 
-                        ClassDB::bind_method(D_METHOD("set_" #NAME), & ##TNT_CLASS_NAME::set_##NAME)
+#define TNTBIND_GS(NAME) TNTBIND_G(NAME); \
+                        ClassDB::bind_method(D_METHOD("set_" #NAME), & ##TNT_CLASS_NAME::set_ ## NAME)
 
-#define TNTADD_G(TYPE,NAME) TNTBIND_G(NAME); \ 
-                            ADD_PROPERTY(PropertyInfo(Variant:: ##TYPE, #NAME), "", "get_" #NAME)
+#define TNTADD_G(TYPE,NAME) TNTBIND_G(NAME); \
+                        ADD_PROPERTY(PropertyInfo(Variant:: ##TYPE, #NAME), "", "get_" #NAME)
 
-#define TNTADD_GS(TYPE,NAME) TNTBIND_GS(NAME); \ 
-                            ADD_PROPERTY(PropertyInfo(Variant:: ##TYPE, #NAME), "set_" #NAME, "get_" #NAME)
+#define TNTADD_GS(TYPE,NAME) TNTBIND_GS(NAME); \
+                        ADD_PROPERTY(PropertyInfo(Variant:: ##TYPE, #NAME), "set_" #NAME, "get_" #NAME)
 
 
 #endif // TNTMACROS_H
