@@ -1,41 +1,59 @@
 #include "turnt_globals.h"
 
+
+
 /*static*/ _TurntGlobals *_TurntGlobals::singleton = nullptr;
+
+
 
 _TurntGlobals::_TurntGlobals()
 {
 	singleton = this;
 }
 
+
+
 _TurntGlobals::~_TurntGlobals()
 {
 	singleton = nullptr;
 }
+
+
 
 /*static*/ _TurntGlobals* _TurntGlobals::get_singleton()
 {
 	return singleton;
 }
 
+
+
 int _TurntGlobals::get_tickrate_int() const
 {
 	return TICKRATE_INT;
 }
+
+
 
 float _TurntGlobals::get_tickrate_f() const
 {
 	return TICKRATE_F;
 }
 
+
+
 int _TurntGlobals::get_one_frame_ms_int() const
 {
 	return ONE_FRAME_MS_INT;
 }
 
+
+
 float _TurntGlobals::get_one_frame_ms_f() const
 {
 	return ONE_FRAME_MS_F;
 }
+
+
 
 String _TurntGlobals::physics_preset_as_str(const E_PHYSICS_PRESET in_preset) const
 {
@@ -52,8 +70,13 @@ String _TurntGlobals::physics_preset_as_str(const E_PHYSICS_PRESET in_preset) co
 
 	case E_PHYSICS_PRESET::VNT:
 		return "VNT";
+
+	default:
+		return "UNKNOWN_PRESET";
 	}
 }
+
+
 
 /*static*/ void _TurntGlobals::_bind_methods()
 {

@@ -6,7 +6,11 @@
 #include "turnt_physics.h"
 #include "netcode/turnt_chat_server.h"
 
+
+
 static _TurntPhysics* turnt_physics = nullptr;
+
+
 
 void register_turnt_types()
 {
@@ -19,6 +23,8 @@ void register_turnt_types()
 
 	Engine::get_singleton()->add_singleton(Engine::Singleton("TurntPhysics", _TurntPhysics::get_singleton()));
 }
+
+
 
 void unregister_turnt_types()
 {

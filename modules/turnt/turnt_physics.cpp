@@ -1,22 +1,32 @@
 #include "turnt_physics.h"
 #include "scene/3d/physics_body.h"
 
+
+
 /*static*/ _TurntPhysics* _TurntPhysics::singleton = nullptr;
+
+
 
 _TurntPhysics::_TurntPhysics()
 {
     singleton = this;
 }
 
+
+
 _TurntPhysics::~_TurntPhysics()
 {
     singleton = nullptr;
 }
 
+
+
 /*static*/ _TurntPhysics* _TurntPhysics::get_singleton()
 {
     return singleton;
 }
+
+
 
 Ref<GroundDetectResult> _TurntPhysics::check_player_on_ground(Object* in_player, const float in_down_dist)
 {
@@ -81,10 +91,14 @@ Ref<GroundDetectResult> _TurntPhysics::check_player_on_ground(Object* in_player,
     return gdr;
 }
 
+
+
 bool _TurntPhysics::normal_is_ground(const Vector3& in_normal)
 {
     return in_normal.y >= 0.7f;
 }
+
+
 
 Vector3 _TurntPhysics::slide_keep_xz_velocity(const Vector3 &in_velocity, const Vector3 &in_normal)
 {
@@ -102,6 +116,8 @@ Vector3 _TurntPhysics::slide_keep_xz_velocity(const Vector3 &in_velocity, const 
 
     return slide_velocity;
 }
+
+
 
 /*static*/ void _TurntPhysics::_bind_methods()
 {
