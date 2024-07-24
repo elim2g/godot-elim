@@ -1,9 +1,5 @@
 #include "turnt_chat_server.h"
 
-// TODO: Replace with C++ version of TntLogger once ready
-#define TNT_LOG(msg, ...) OS::get_singleton()->print("[ChatServer] " msg "\n", __VA_ARGS__)
-#define TNT_LOGERR(msg, ...) OS::get_singleton()->printerr("[ChatServer] " msg "\n", __VA_ARGS__)
-
 
 
 TurntChatServer::TurntChatServer()
@@ -73,21 +69,32 @@ void TurntChatServer::stop_server()
 
 void TurntChatServer::_process(float delta)
 {
-    // Check if peers awaiting authentication have authed or timed out
+    // Cycle through the poor sods in the w8ing room (peers pending auth)
+    // We iterate backwards here because terminating a client will remove them from the vector immediately
     for (uint32_t i = m_peers_awaiting_auth.size()-1; i >= 0; --i)
     {
         TurntChatPeer* tcp = m_peers_awaiting_auth[i];
-        // TODO: Check for timeout
+
+        // Transient network failures, timeouts n shit
+        if (tcp->is_peer_unhealthy())
+        {
+            terminate_and_remove_peer(tcp->get_local_id());
+            continue;
+        }
+
+        // Once the client has authenticated, we allow them to participate in The Chats(TM)
         if (tcp->is_authenticated())
         {
             m_authenticated_peers.push_back(tcp);
             m_peers_awaiting_auth.remove(i);
+
             continue;
         }
         // If something prevented authentication, it's cy@ l8r
         else if (!tcp->is_authenticating())
         {
             terminate_and_remove_peer(tcp->get_local_id());
+            continue;
         }
     }
 
