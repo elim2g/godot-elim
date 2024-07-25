@@ -12,6 +12,47 @@ TurntChatServer::TurntChatServer()
 
 
 
+void TurntChatServer::_process(float delta)
+{
+    // Cycle through the poor sods in the w8ing room (peers pending auth)
+    // We iterate backwards here because terminating a client will remove them from the vector immediately
+    for (uint32_t i = m_peers_awaiting_auth.size()-1; i >= 0; --i)
+    {
+        TurntChatPeer* tcp = m_peers_awaiting_auth[i];
+
+        // Transient network failures, timeouts n shit
+        if (tcp->is_peer_unhealthy())
+        {
+            terminate_and_remove_peer(tcp->get_local_id());
+            continue;
+        }
+
+        // Once the client has authenticated, we allow them to participate in The Chats(TM)
+        if (tcp->is_authenticated())
+        {
+            m_authenticated_peers.push_back(tcp);
+            m_peers_awaiting_auth.remove(i);
+
+            continue;
+        }
+        // If something prevented authentication, it's cy@ l8r
+        else if (!tcp->is_authenticating())
+        {
+            terminate_and_remove_peer(tcp->get_local_id());
+            continue;
+        }
+    }
+
+    // TODO: Loop through authenticated peers
+    //       Check if they need to be deleted (ie disconnect)
+    //       Otherwise check for chat messages and do chat things
+
+    // Handle any new incoming connections
+    handle_incoming_connections();
+}
+
+
+
 bool TurntChatServer::start_server()
 { 
     if (is_listening())
@@ -63,47 +104,6 @@ void TurntChatServer::stop_server()
 
         TNT_LOG("All peers terminated.");
     }
-}
-
-
-
-void TurntChatServer::_process(float delta)
-{
-    // Cycle through the poor sods in the w8ing room (peers pending auth)
-    // We iterate backwards here because terminating a client will remove them from the vector immediately
-    for (uint32_t i = m_peers_awaiting_auth.size()-1; i >= 0; --i)
-    {
-        TurntChatPeer* tcp = m_peers_awaiting_auth[i];
-
-        // Transient network failures, timeouts n shit
-        if (tcp->is_peer_unhealthy())
-        {
-            terminate_and_remove_peer(tcp->get_local_id());
-            continue;
-        }
-
-        // Once the client has authenticated, we allow them to participate in The Chats(TM)
-        if (tcp->is_authenticated())
-        {
-            m_authenticated_peers.push_back(tcp);
-            m_peers_awaiting_auth.remove(i);
-
-            continue;
-        }
-        // If something prevented authentication, it's cy@ l8r
-        else if (!tcp->is_authenticating())
-        {
-            terminate_and_remove_peer(tcp->get_local_id());
-            continue;
-        }
-    }
-
-    // TODO: Loop through authenticated peers
-    //       Check if they need to be deleted (ie disconnect)
-    //       Otherwise check for chat messages and do chat things
-
-    // Handle any new incoming connections
-    handle_incoming_connections();
 }
 
 

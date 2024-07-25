@@ -23,14 +23,15 @@ class TurntChatServer : public TCP_Server
 public:
     TurntChatServer();
 
-    bool start_server();
-    void stop_server();
-
     void _process(float delta);
 
+// GDScript-accessible
 public:
     TNTPROP_GS(int, num_max_connections);
     TNTPROP_GS(int, tcp_port);
+
+    bool start_server();
+    void stop_server();
 
 private:
     // Wrap back around to 0

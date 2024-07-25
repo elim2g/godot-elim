@@ -5,6 +5,7 @@
 #include "turnt.h"
 #include "turnt_physics.h"
 #include "netcode/turnt_chat_server.h"
+#include "netcode/turnt_chat_client.h"
 
 
 
@@ -20,6 +21,7 @@ void register_turnt_types()
     ClassDB::register_class<GroundDetectResult>();
     ClassDB::register_class<_TurntPhysics>();
     ClassDB::register_class<TurntChatServer>();
+    ClassDB::register_class<TurntChatClient>();
 
 	Engine::get_singleton()->add_singleton(Engine::Singleton("TurntPhysics", _TurntPhysics::get_singleton()));
 }
