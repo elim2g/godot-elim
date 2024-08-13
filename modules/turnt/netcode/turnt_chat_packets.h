@@ -3,15 +3,10 @@
 
 #include <cstdint>
 #include "core/ustring.h"
+#include "turnt_net_def.h"
 
 // Note: Packet structs are prefixed with TP for "TurntPacket"
 //       Yes yes I know I'm very imaginative 
-
-// Auth tokens are variable length and could be fuckin anything
-// For now I'm enforcing a max size of 512kb for the sake of preventing easy DDOS
-constexpr uint32_t MAX_AUTHTOKEN_LEN = 512 * 1024;
-
-
 
 struct TPClientAuthToken
 {
@@ -19,7 +14,8 @@ struct TPClientAuthToken
 
     template<typename NetStream> bool Serialise(NetStream& ns)
     {
-        if (!ns.s_utf8(auth_token.get_data(), auth_token.length(), MAX_AUTHTOKEN_LEN))
+        ns.declare_size(AUTHTOKEN_HEADER_BYTES + MAX_AUTHTOKEN_LEN);
+        if (!ns.s_utf8<MAX_AUTHTOKEN_LEN>(auth_token, MAX_AUTHTOKEN_LEN))
         {
             return false;
         }

@@ -1,5 +1,10 @@
 #include "turnt_chat_server.h"
 
+#ifdef TNT_CLASS_NAME
+#undef TNT_CLASS_NAME
+#endif // TNT_CLASS_NAME
+#define TNT_CLASS_NAME TurntChatServer
+
 
 
 TurntChatServer::TurntChatServer()
@@ -57,7 +62,7 @@ bool TurntChatServer::start_server()
 { 
     if (is_listening())
     {
-        TNT_LOG("start_server() called when already listening!");
+        TNT_LOG("start_server() called when already listening!", "");
         return true; // Return true since if we're already listening, then we technically HAVE successfully started the server..
     }
 
@@ -80,12 +85,12 @@ void TurntChatServer::stop_server()
 { 
     if (!is_listening())
     {
-        TNT_LOG("stop_server() called when not listening!");
+        TNT_LOG("stop_server() called when not listening!", "");
         return;
     }
 
     stop();
-    TNT_LOG("Stopped listening. Connections will now be closed.");
+    TNT_LOG("Stopped listening. Connections will now be closed.", "");
 
     if (m_chat_peers.size() > 0)
     {
@@ -102,7 +107,7 @@ void TurntChatServer::stop_server()
             terminate_and_remove_peer(active_plids[i]);
         }
 
-        TNT_LOG("All peers terminated.");
+        TNT_LOG("All peers terminated.", "");
     }
 }
 
