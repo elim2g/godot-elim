@@ -1,7 +1,7 @@
 #ifndef TURNT_CHAT_PEER_H
 #define TURNT_CHAT_PEER_H
 
-#include "core/io/stream_peer_tcp.h"
+#include "core/io/tcp_server.h"
 #include "core/os/os.h"
 #include "core/os/time.h"
 

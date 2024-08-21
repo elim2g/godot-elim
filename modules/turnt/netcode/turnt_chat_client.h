@@ -3,12 +3,7 @@
 
 #include "core/io/stream_peer_tcp.h"
 #include "../turnt_globals.h"
-
 #include "../tnt_macros.h"
-#ifdef TNT_CLASS_NAME
-#undef TNT_CLASS_NAME
-#endif // TNT_CLASS_NAME
-#define TNT_CLASS_NAME TurntChatClient
 
 static int DEFAULT_TCP_PORT = 25235;
 
@@ -37,10 +32,10 @@ protected:
         ClassDB::bind_method(D_METHOD("start_connection_to_host"), &TurntChatClient::start_connection_to_host);
         ClassDB::bind_method(D_METHOD("disconnect_from_host"), &TurntChatClient::disconnect_from_host);
 
-        TNTADD_GS(STRING, host_ip);
-        TNTADD_GS(INT, tcp_port);
-        TNTADD_GS(STRING, auth_token);
-        TNTADD_G(BOOL, is_authenticated);
+        TNTADD_GS(TurntChatClient, STRING, host_ip);
+        TNTADD_GS(TurntChatClient, INT, tcp_port);
+        TNTADD_GS(TurntChatClient, STRING, auth_token);
+        TNTADD_G(TurntChatClient, BOOL, is_authenticated);
     }
 
 };

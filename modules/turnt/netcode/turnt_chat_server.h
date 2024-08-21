@@ -1,20 +1,14 @@
 #ifndef TURNT_CHAT_SERVER_H
 #define TURNT_CHAT_SERVER_H
 
-#include "core/io/tcp_server.h"
-#include "core/os/os.h"
-#include "core/os/time.h"
-#include "../turnt_globals.h"
-
 #include "turnt_chat_peer.h"
+#include "../turnt_globals.h"
 #include "../tnt_macros.h"
-#ifdef TNT_CLASS_NAME
-#undef TNT_CLASS_NAME
-#endif // TNT_CLASS_NAME
-#define TNT_CLASS_NAME TurntChatServer
 
 static int DEFAULT_NUM_MAX_CONNECTIONS = 64;
 static int DEFAULT_PORT = 25235;
+
+class TCP_Server;
 
 class TurntChatServer : public TCP_Server
 {

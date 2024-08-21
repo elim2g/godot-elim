@@ -1,10 +1,5 @@
 #include "turnt_chat_server.h"
 
-#ifdef TNT_CLASS_NAME
-#undef TNT_CLASS_NAME
-#endif // TNT_CLASS_NAME
-#define TNT_CLASS_NAME TurntChatServer
-
 
 
 TurntChatServer::TurntChatServer()
@@ -62,19 +57,19 @@ bool TurntChatServer::start_server()
 { 
     if (is_listening())
     {
-        TNT_LOG("start_server() called when already listening!", "");
+        TNT_LOG(TurntChatServer, "start_server() called when already listening!", "");
         return true; // Return true since if we're already listening, then we technically HAVE successfully started the server..
     }
 
     Error err = listen(static_cast<uint16_t>(m_tcp_port));
     if (err != Error::OK)
     {
-        TNT_LOGERR("Error listening on port %d with err code %d", m_tcp_port, err);
+        TNT_LOGERR(TurntChatServer, "Error listening on port %d with err code %d", m_tcp_port, err);
         return false;
     }
     else
     {
-        TNT_LOG("Started listening on port %d", m_tcp_port);
+        TNT_LOG(TurntChatServer, "Started listening on port %d", m_tcp_port);
         return true;
     }
 }
@@ -85,12 +80,12 @@ void TurntChatServer::stop_server()
 { 
     if (!is_listening())
     {
-        TNT_LOG("stop_server() called when not listening!", "");
+        TNT_LOG(TurntChatServer, "stop_server() called when not listening!", "");
         return;
     }
 
     stop();
-    TNT_LOG("Stopped listening. Connections will now be closed.", "");
+    TNT_LOG(TurntChatServer, "Stopped listening. Connections will now be closed.", "");
 
     if (m_chat_peers.size() > 0)
     {
@@ -107,7 +102,7 @@ void TurntChatServer::stop_server()
             terminate_and_remove_peer(active_plids[i]);
         }
 
-        TNT_LOG("All peers terminated.", "");
+        TNT_LOG(TurntChatServer, "All peers terminated.", "");
     }
 }
 
@@ -126,7 +121,7 @@ void TurntChatServer::handle_incoming_connections()
         TurntChatPeer* new_peer = memnew(TurntChatPeer(take_connection(), get_next_local_id()));
         m_chat_peers.push_back(new_peer);
         m_peers_awaiting_auth.push_back(new_peer);
-        TNT_LOG("New peer accepted. Handed local_id %d", new_peer->get_local_id());
+        TNT_LOG(TurntChatServer, "New peer accepted. Handed local_id %d", new_peer->get_local_id());
         // TODO: Kick off auth process
     }
 }
@@ -153,7 +148,7 @@ void TurntChatServer::terminate_and_remove_peer(const uint16_t plid)
 
     if (tcp == nullptr)
     {
-        TNT_LOGERR("terminate_and_remove_peer unable to find peer with plid %d", plid);
+        TNT_LOGERR(TurntChatServer, "terminate_and_remove_peer unable to find peer with plid %d", plid);
     }
 
     // m_peers_awaiting_auth
@@ -169,7 +164,7 @@ void TurntChatServer::terminate_and_remove_peer(const uint16_t plid)
             {
                 tcp = p;
                 tcp->terminate_connection();
-                TNT_LOGERR("terminate_and_remove_peer found missing peer %d in m_peers_awaiting_auth", plid);
+                TNT_LOGERR(TurntChatServer, "terminate_and_remove_peer found missing peer %d in m_peers_awaiting_auth", plid);
             }
 
             break;
@@ -189,7 +184,7 @@ void TurntChatServer::terminate_and_remove_peer(const uint16_t plid)
             {
                 tcp = p;
                 tcp->terminate_connection();
-                TNT_LOGERR("terminate_and_remove_peer found missing peer %d in m_authenticated_peers", plid);
+                TNT_LOGERR(TurntChatServer, "terminate_and_remove_peer found missing peer %d in m_authenticated_peers", plid);
             }
 
             break;
@@ -199,7 +194,7 @@ void TurntChatServer::terminate_and_remove_peer(const uint16_t plid)
     if (tcp)
     {
         memdelete(tcp);
-        TNT_LOG("Terminated peer %d", plid);
+        TNT_LOG(TurntChatServer, "Terminated peer %d", plid);
     }
 }
 
@@ -210,6 +205,6 @@ void TurntChatServer::terminate_and_remove_peer(const uint16_t plid)
     ClassDB::bind_method(D_METHOD("start_server"), &TurntChatServer::start_server);    
     ClassDB::bind_method(D_METHOD("stop_server"), &TurntChatServer::stop_server);    
 
-    TNTADD_GS(INT, num_max_connections);
-    TNTADD_GS(INT, tcp_port);
+    TNTADD_GS(TurntChatServer, INT, num_max_connections);
+    TNTADD_GS(TurntChatServer, INT, tcp_port);
 }
