@@ -8,14 +8,21 @@
 // Note: Packet structs are prefixed with TP for "TurntPacket"
 //       Yes yes I know I'm very imaginative 
 
+// AuthTokens can be variable size. IDK what max value to enforce so we're stickin with 512kb for now.
+// Anything larger than that can simply get fucked for now
+constexpr uint64_t MAX_AUTHTOKEN_LEN = 1024 * 512;
+
 struct TPClientAuthToken
 {
     CharString auth_token;
 
     template<typename NetStream> bool Serialise(NetStream& ns)
     {
-        ns.declare_size(AUTHTOKEN_HEADER_BYTES + MAX_AUTHTOKEN_LEN);
-        if (!ns.s_utf8<MAX_AUTHTOKEN_LEN>(auth_token, MAX_AUTHTOKEN_LEN))
+        ns.declare_size(sizeof(net_id_t) + sizeof(authtoken_len_t) + MAX_AUTHTOKEN_LEN);
+
+        ns.s_u8(NID_AUTHTOKEN)
+
+        if (!ns.s_utf8(auth_token, MAX_AUTHTOKEN_LEN))
         {
             return false;
         }

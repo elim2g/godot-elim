@@ -35,8 +35,10 @@
 
 
 // Basic logging with [class_name] prefix
-#define TNT_LOG(TNT_CLASS_NAME,msg, ...) OS::get_singleton()->print("[" XSTR(TNT_CLASS_NAME) "] " msg "\n", __VA_ARGS__)
-#define TNT_LOGERR(TNT_CLASS_NAME,msg, ...) OS::get_singleton()->printerr("[" XSTR(TNT_CLASS_NAME) "] " msg "\n", __VA_ARGS__)
+#define TNT_LOG(TNT_CLASS_NAME,msg) OS::get_singleton()->print("[" #TNT_CLASS_NAME "] " msg "\n");
+#define TNT_LOG_ARGS(TNT_CLASS_NAME,msg, ...) OS::get_singleton()->print("[" #TNT_CLASS_NAME "] " msg "\n", __VA_ARGS__)
+#define TNT_LOGERR(TNT_CLASS_NAME,msg) OS::get_singleton()->printerr("[" #TNT_CLASS_NAME "] " msg "\n")
+#define TNT_LOGERR_ARGS(TNT_CLASS_NAME,msg, ...) OS::get_singleton()->printerr("[" #TNT_CLASS_NAME "] " msg "\n", __VA_ARGS__)
 
 
 

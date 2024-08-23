@@ -10,45 +10,19 @@ class TurntStreamWriter
 public:
     TurntStreamWriter() = default;
 
-    void declare_size(const uint64_t in_size)
-    {
-        m_buf.resize(in_size);
-    }
+    void declare_size(const uint64_t in_size);
 
-    template<uint64_t T_MAX_LEN>
-    bool s_utf8(CharString* in_str, const uint64_t max_len)
-    {
-        const int len = in_str->length();
-        if (len > max_len)
-        {
-            return false;
-        }
+    void s_u8(const uint8_t in_val);
+    void s_u16(const uint16_t in_val);
+    void s_u32(const uint32_t in_val);
+    void s_u64(const uint64_t in_val);
+    void s_i8(const int8_t in_val);
+    void s_i16(const int16_t in_val);
+    void s_i32(const int32_t in_val);
+    void s_i64(const int64_t in_val);
 
-        // Write the string length
-        // Any self-respecting compiler will eliminate branches here as we're passing
-        //  a compile-time constant to check against
-        if (max_len < UINT8_MAX)
-        {
-            m_buf.put_u8(static_cast<uint8_t>(len));
-        }
-        else if (max_len < UINT16_MAX)
-        {
-            m_buf.put_u16(static_cast<uint16_t>(len));
-        }
-        else if (max_len < UINT32_MAX)
-        {
-            m_buf.put_u32(static_cast<uint32_t>(len));
-        }
-        else
-        {
-            // Bro if I'm writing strings that require a 64-byte length prefix I shouldn't
-            //  be writing software aye
-            m_buf.put_u64(static_cast<uint64_t>(len));
-        }
-
-        return (len > 0)    ? (m_buf.put_data(in_str->get_data(), len) == Error::OK)
-                            : true; // Zero-length strings are allowed. We just don't write any data after the length.
-    }
+    // max_len - Safeguard. If in_str's length exceeds this, the serialisation will fail
+    bool s_utf8(CharString* in_str, const uint64_t max_len);
 
 private:
     StreamPeerBuffer m_buf;
