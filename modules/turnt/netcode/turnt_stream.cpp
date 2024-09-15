@@ -4,6 +4,7 @@
 
 
 
+// TURNT STREAM WRITER
 void TurntStreamWriter::declare_size(const uint64_t in_size)
 {
     m_buf.resize(in_size);
@@ -102,3 +103,117 @@ bool TurntStreamWriter::s_utf8(CharString* in_str, const uint64_t max_len)
 
     return true;
 }
+// !TURNT STREAM WRITER
+
+
+
+// TURNT STREAM READER
+void TurntStreamReader::s_u8(uint8_t& out_val)
+{
+    ensure_data_avail(sizeof(out_val));
+    out_val = m_buf->get_u8();
+}
+
+
+
+void TurntStreamReader::s_u16(uint16_t& out_val)
+{
+    ensure_data_avail(sizeof(out_val));
+    out_val = m_buf->get_u16();
+}
+
+
+
+void TurntStreamReader::s_u32(uint32_t& out_val)
+{
+    ensure_data_avail(sizeof(out_val));
+    out_val = m_buf->get_u32();
+}
+
+
+
+void TurntStreamReader::s_u64(uint64_t& out_val)
+{
+    ensure_data_avail(sizeof(out_val));
+    out_val = m_buf->get_u64();
+}
+
+
+
+void TurntStreamReader::s_i8(int8_t& out_val)
+{
+    ensure_data_avail(sizeof(out_val));
+    out_val = m_buf->get_8();
+}
+
+
+
+void TurntStreamReader::s_i16(int16_t& out_val)
+{
+    ensure_data_avail(sizeof(out_val));
+    out_val = m_buf->get_16();
+}
+
+
+
+void TurntStreamReader::s_i32(int32_t& out_val)
+{
+    ensure_data_avail(sizeof(out_val));
+    out_val = m_buf->get_32();
+}
+
+
+
+void TurntStreamReader::s_i64(int64_t& out_val)
+{
+    ensure_data_avail(sizeof(out_val));
+    out_val = m_buf->get_64();
+}
+
+
+
+bool TurntStreamReader::s_utf8(CharString* out_str, const uint64_t max_len)
+{
+    uint64_t strlen = 0;
+    if (max_len <= UINT8_MAX)
+    {
+        ensure_data_avail(sizeof(uint8_t));
+        strlen = static_cast<uint64_t>(m_buf->get_u8());
+    }
+    else if (max_len <= UINT16_MAX)
+    {
+        ensure_data_avail(sizeof(uint16_t));
+        strlen = static_cast<uint64_t>(m_buf->get_u16());
+    }
+    else if (max_len <= UINT32_MAX)
+    {
+        ensure_data_avail(sizeof(uint32_t));
+        strlen = static_cast<uint64_t>(m_buf->get_u32());
+    }
+    else
+    {
+        TNT_LOGERR_ARGS(TurntStreamReader, "Cannot read a string with length potentially longer than what can be held in a u32: max_len %llu", max_len);
+        return false;
+    }
+
+    // Zero-length strings are allowed
+    if (strlen <= 0)
+    {
+        *out_str = "";
+        return true;
+    }
+
+    ensure_data_avail(strlen);
+    m_buf->get_data((uint8_t*)out_str->ptr(), strlen);
+
+    return true;
+}
+
+
+
+void TurntStreamReader::ensure_data_avail(const uint64_t num_bytes)
+{
+    const bool safe_to_read = (m_buf->get_size() - m_buf->get_position()) > num_bytes;
+    ERR_FAIL_COND_MSG(!safe_to_read, "[TurntStreamReader] Attempting to read more data from buffer than available");
+}
+// !TURNT STREAM READER
