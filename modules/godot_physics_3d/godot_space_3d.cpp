@@ -992,6 +992,9 @@ bool GodotSpace3D::test_body_motion(GodotBody3D *p_body, const PhysicsServer3D::
 					collision.collider_shape = result.shape;
 					collision.local_shape = result.local_shape;
 					collision.normal = result.normal;
+					// <ELIM> Add surface normals to collision result
+					collision.surface_normal = result.normal; // GodotPhysics doesn't have separate surface normals
+					// </ELIM>
 					collision.position = result.contact;
 					collision.depth = result.len;
 

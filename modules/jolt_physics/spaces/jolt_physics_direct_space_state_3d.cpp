@@ -365,10 +365,29 @@ bool JoltPhysicsDirectSpaceState3D::_body_motion_collide(const JoltBody3D &p_bod
 		for (JPH::Vec3 contact_point : contact_points2) {
 			const Vector3 position = base_offset + to_godot(contact_point);
 
+			// <ELIM> Add surface normal to collision result
+			// Compute actual surface normal (face normal) instead of penetration normal
+			Vector3 surface_normal = normal; // Default to penetration normal
+			const JPH::Body *collider_body = collider->get_jolt_body();
+			if (collider_body != nullptr) {
+				const JPH::RVec3 jolt_position = to_jolt_r(position);
+				const JPH::Vec3 jolt_surface_normal = collider_body->GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, jolt_position);
+				surface_normal = to_godot(jolt_surface_normal);
+
+				// Ensure surface normal points in same hemisphere as penetration normal
+				if (normal.dot(surface_normal) < 0.0f) {
+					surface_normal = -surface_normal;
+				}
+			}
+			// </ELIM>
+
 			PhysicsServer3D::MotionCollision &collision = p_result->collisions[count++];
 
 			collision.position = position;
 			collision.normal = normal;
+			// <ELIM> Add surface normal to collision result
+			collision.surface_normal = surface_normal;
+			// </ELIM>
 			collision.collider_velocity = collider->get_velocity_at_position(position);
 			collision.collider_angular_velocity = collider->get_angular_velocity();
 			collision.depth = penetration_depth;

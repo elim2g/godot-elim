@@ -58,6 +58,13 @@ Vector3 KinematicCollision3D::get_normal(int p_collision_index) const {
 	return result.collisions[p_collision_index].normal;
 }
 
+// <ELIM> Add surface normal to collision results
+Vector3 KinematicCollision3D::get_surface_normal(int p_collision_index) const {
+	ERR_FAIL_INDEX_V(p_collision_index, result.collision_count, Vector3());
+	return result.collisions[p_collision_index].surface_normal;
+}
+// </ELIM>
+
 real_t KinematicCollision3D::get_angle(int p_collision_index, const Vector3 &p_up_direction) const {
 	ERR_FAIL_INDEX_V(p_collision_index, result.collision_count, 0.0);
 	ERR_FAIL_COND_V(p_up_direction == Vector3(), 0);
@@ -123,6 +130,9 @@ void KinematicCollision3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_collision_count"), &KinematicCollision3D::get_collision_count);
 	ClassDB::bind_method(D_METHOD("get_position", "collision_index"), &KinematicCollision3D::get_position, DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("get_normal", "collision_index"), &KinematicCollision3D::get_normal, DEFVAL(0));
+	// <ELIM> Add surface normal to collision result
+	ClassDB::bind_method(D_METHOD("get_surface_normal", "collision_index"), &KinematicCollision3D::get_surface_normal, DEFVAL(0));
+	// </ELIM>
 	ClassDB::bind_method(D_METHOD("get_angle", "collision_index", "up_direction"), &KinematicCollision3D::get_angle, DEFVAL(0), DEFVAL(Vector3(0.0, 1.0, 0.0)));
 	ClassDB::bind_method(D_METHOD("get_local_shape", "collision_index"), &KinematicCollision3D::get_local_shape, DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("get_collider", "collision_index"), &KinematicCollision3D::get_collider, DEFVAL(0));
