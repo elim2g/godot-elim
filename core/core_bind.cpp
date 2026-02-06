@@ -2285,7 +2285,60 @@ void EngineDebugger::clear_breakpoints() {
 	::EngineDebugger::get_script_debugger()->clear_breakpoints();
 }
 
+// Error capture implementation
+void EngineDebugger::_error_capture_callback(void *p_this, const char *p_function, const char *p_file, int p_line, const char *p_error, const char *p_explanation, bool p_editor_notify, ErrorHandlerType p_type) {
+	EngineDebugger *self = static_cast<EngineDebugger *>(p_this);
+	self->captured_error_count++;
+	if (p_type == ERR_HANDLER_SCRIPT) {
+		self->captured_script_error_count++;
+	}
+}
+
+void EngineDebugger::start_error_capture() {
+	if (capturing_errors) {
+		stop_error_capture();
+	}
+	captured_error_count = 0;
+	captured_script_error_count = 0;
+	capturing_errors = true;
+	add_error_handler(&error_capture_handler);
+}
+
+void EngineDebugger::stop_error_capture() {
+	if (!capturing_errors) {
+		return;
+	}
+	capturing_errors = false;
+	remove_error_handler(&error_capture_handler);
+}
+
+int EngineDebugger::get_captured_error_count() const {
+	return captured_error_count;
+}
+
+int EngineDebugger::get_captured_script_error_count() const {
+	return captured_script_error_count;
+}
+
+void EngineDebugger::clear_error_capture() {
+	captured_error_count = 0;
+	captured_script_error_count = 0;
+}
+
+bool EngineDebugger::is_capturing_errors() const {
+	return capturing_errors;
+}
+
+EngineDebugger::EngineDebugger() {
+	singleton = this;
+	error_capture_handler.errfunc = _error_capture_callback;
+	error_capture_handler.userdata = this;
+}
+
 EngineDebugger::~EngineDebugger() {
+	if (capturing_errors) {
+		stop_error_capture();
+	}
 	for (const KeyValue<StringName, Callable> &E : captures) {
 		::EngineDebugger::unregister_message_capture(E.key);
 	}
@@ -2325,6 +2378,14 @@ void EngineDebugger::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("insert_breakpoint", "line", "source"), &EngineDebugger::insert_breakpoint);
 	ClassDB::bind_method(D_METHOD("remove_breakpoint", "line", "source"), &EngineDebugger::remove_breakpoint);
 	ClassDB::bind_method(D_METHOD("clear_breakpoints"), &EngineDebugger::clear_breakpoints);
+
+	// Error capture methods for test frameworks
+	ClassDB::bind_method(D_METHOD("start_error_capture"), &EngineDebugger::start_error_capture);
+	ClassDB::bind_method(D_METHOD("stop_error_capture"), &EngineDebugger::stop_error_capture);
+	ClassDB::bind_method(D_METHOD("get_captured_error_count"), &EngineDebugger::get_captured_error_count);
+	ClassDB::bind_method(D_METHOD("get_captured_script_error_count"), &EngineDebugger::get_captured_script_error_count);
+	ClassDB::bind_method(D_METHOD("clear_error_capture"), &EngineDebugger::clear_error_capture);
+	ClassDB::bind_method(D_METHOD("is_capturing_errors"), &EngineDebugger::is_capturing_errors);
 }
 
 } // namespace CoreBind

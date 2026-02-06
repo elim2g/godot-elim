@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/debugger/engine_profiler.h"
+#include "core/error/error_macros.h"
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
 #include "core/object/script_backtrace.h"
@@ -646,6 +647,14 @@ class EngineDebugger : public Object {
 	HashMap<StringName, Callable> captures;
 	HashMap<StringName, Ref<EngineProfiler>> profilers;
 
+	// Error capture for detecting SCRIPT ERRORs during test execution
+	ErrorHandlerList error_capture_handler;
+	int captured_error_count = 0;
+	int captured_script_error_count = 0;
+	bool capturing_errors = false;
+
+	static void _error_capture_callback(void *p_this, const char *p_function, const char *p_file, int p_line, const char *p_error, const char *p_explanation, bool p_editor_notify, ErrorHandlerType p_type);
+
 protected:
 	static void _bind_methods();
 	static inline EngineDebugger *singleton = nullptr;
@@ -686,7 +695,15 @@ public:
 	void remove_breakpoint(int p_line, const StringName &p_source);
 	void clear_breakpoints();
 
-	EngineDebugger() { singleton = this; }
+	// Error capture API for test frameworks
+	void start_error_capture();
+	void stop_error_capture();
+	int get_captured_error_count() const;
+	int get_captured_script_error_count() const;
+	void clear_error_capture();
+	bool is_capturing_errors() const;
+
+	EngineDebugger();
 	~EngineDebugger();
 };
 
