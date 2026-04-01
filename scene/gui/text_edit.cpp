@@ -938,7 +938,7 @@ void TextEdit::_notification(int p_what) {
 			int left_margin = Math::ceil(style->get_margin(SIDE_LEFT));
 			int xmargin_beg = left_margin + gutters_width + gutter_padding;
 
-			int xmargin_end = size.width - Math::ceil(style->get_margin(SIDE_RIGHT));
+			int xmargin_end = size.width - Math::floor(style->get_margin(SIDE_RIGHT));
 			if (draw_minimap) {
 				xmargin_end -= minimap_width;
 			}
@@ -1403,9 +1403,9 @@ void TextEdit::_notification(int p_what) {
 					// Draw current line highlight.
 					if (highlight_current_line && highlighted_lines.has(Pair<int, int>(line, line_wrap_index))) {
 						if (rtl) {
-							RS::get_singleton()->canvas_item_add_rect(text_ci, Rect2(size.width - xmargin_end, ofs_y, xmargin_end - xmargin_beg, row_height), theme_cache.current_line_color);
+							RS::get_singleton()->canvas_item_add_rect(text_ci, Rect2(size.width - xmargin_end, ofs_y, xmargin_end, row_height), theme_cache.current_line_color);
 						} else {
-							RS::get_singleton()->canvas_item_add_rect(text_ci, Rect2(xmargin_beg, ofs_y, xmargin_end - xmargin_beg, row_height), theme_cache.current_line_color);
+							RS::get_singleton()->canvas_item_add_rect(text_ci, Rect2(0, ofs_y, xmargin_end, row_height), theme_cache.current_line_color);
 						}
 					}
 
@@ -3606,7 +3606,7 @@ Control::CursorShape TextEdit::get_cursor_shape(const Point2 &p_pos) const {
 		return CURSOR_ARROW;
 	}
 
-	int xmargin_end = get_size().width - Math::ceil(style->get_margin(SIDE_RIGHT));
+	int xmargin_end = get_size().width - Math::floor(style->get_margin(SIDE_RIGHT));
 	if (draw_minimap && p_pos.x > xmargin_end - minimap_width && p_pos.x <= xmargin_end) {
 		return CURSOR_ARROW;
 	}
@@ -8890,7 +8890,7 @@ void TextEdit::_adjust_viewport_to_caret_horizontally(int p_caret, bool p_maximi
 
 void TextEdit::_update_minimap_hover() {
 	const Point2 mp = get_local_mouse_pos();
-	const int xmargin_end = get_size().width - Math::ceil(_get_current_stylebox()->get_margin(SIDE_RIGHT));
+	const int xmargin_end = get_size().width - Math::floor(_get_current_stylebox()->get_margin(SIDE_RIGHT));
 
 	bool hovering_sidebar = mp.x > xmargin_end - minimap_width && mp.x < xmargin_end;
 	if (!hovering_sidebar) {
@@ -8917,7 +8917,7 @@ void TextEdit::_update_minimap_hover() {
 void TextEdit::_update_minimap_click() {
 	Point2 mp = get_local_mouse_pos();
 
-	int xmargin_end = get_size().width - Math::ceil(_get_current_stylebox()->get_margin(SIDE_RIGHT));
+	int xmargin_end = get_size().width - Math::floor(_get_current_stylebox()->get_margin(SIDE_RIGHT));
 	if (!dragging_minimap && (mp.x < xmargin_end - minimap_width || mp.x > xmargin_end)) {
 		minimap_clicked = false;
 		return;

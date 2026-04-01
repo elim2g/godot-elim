@@ -3951,25 +3951,37 @@ void SceneTreeDock::_tree_rmb(const Vector2 &p_menu_pos) {
 	}
 
 	if (profile_allow_editing) {
-		bool is_foreign = false;
+		bool can_rename = true;
+		bool can_replace = true;
+
 		for (Node *E : selection) {
 			if (E != edited_scene && (E->get_owner() != edited_scene || E->is_instance())) {
-				is_foreign = true;
-				break;
+				can_replace = false;
+				if (!E->is_instance()) {
+					can_rename = false;
+				}
 			}
 
 			if (edited_scene->get_scene_inherited_state().is_valid()) {
 				if (E == edited_scene || edited_scene->get_scene_inherited_state()->find_node_by_path(edited_scene->get_path_to(E)) >= 0) {
-					is_foreign = true;
-					break;
+					can_replace = false;
+					can_rename = false;
 				}
+			}
+
+			if (!can_rename && !can_replace) {
+				break;
 			}
 		}
 
-		if (!is_foreign) {
+		if (can_rename || can_replace) {
 			BEGIN_SECTION()
-			menu->add_icon_shortcut(get_editor_theme_icon(SNAME("Rename")), ED_GET_SHORTCUT("scene_tree/rename"), TOOL_RENAME);
-			menu->add_icon_shortcut(get_editor_theme_icon(SNAME("Reload")), ED_GET_SHORTCUT("scene_tree/change_node_type"), TOOL_REPLACE);
+			if (can_rename) {
+				menu->add_icon_shortcut(get_editor_theme_icon(SNAME("Rename")), ED_GET_SHORTCUT("scene_tree/rename"), TOOL_RENAME);
+			}
+			if (can_replace) {
+				menu->add_icon_shortcut(get_editor_theme_icon(SNAME("Reload")), ED_GET_SHORTCUT("scene_tree/change_node_type"), TOOL_REPLACE);
+			}
 			END_SECTION()
 		}
 
@@ -4199,7 +4211,10 @@ void SceneTreeDock::save_branch_to_file(const String &p_directory) {
 
 void SceneTreeDock::_focus_node() {
 	Node *node = scene_tree->get_selected();
-	ERR_FAIL_NULL(node);
+	// This method handles the item_icon_double_clicked signal and there is no guarantee anything is actually selected.
+	if (!node) {
+		return;
+	}
 
 	if (node->is_class("CanvasItem")) {
 		CanvasItemEditorPlugin *editor = Object::cast_to<CanvasItemEditorPlugin>(editor_data->get_editor_by_name("2D"));
@@ -4867,7 +4882,7 @@ SceneTreeDock::SceneTreeDock(Node *p_scene_root, EditorSelection *p_editor_selec
 	button_detach_script->hide();
 
 	button_extend_script = memnew(Button);
-	button_extend_script->set_flat(true);
+	button_extend_script->set_theme_type_variation("FlatMenuButton");
 	button_extend_script->connect(SceneStringName(pressed), callable_mp(this, &SceneTreeDock::_tool_selected).bind(TOOL_EXTEND_SCRIPT, false));
 	button_extend_script->set_tooltip_text(TTRC("Extend the script of the selected node."));
 	button_extend_script->set_shortcut(ED_GET_SHORTCUT("scene_tree/extend_script"));

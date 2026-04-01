@@ -12,6 +12,12 @@
 #define SHADER_IS_SRGB false
 #define SHADER_SPACE_FAR 0.0
 
+#ifdef USE_MULTIVIEW
+#define OUTPUT_IS_MULTIVIEW true
+#else
+#define OUTPUT_IS_MULTIVIEW false
+#endif
+
 /* INPUT ATTRIBS */
 
 // Always contains vertex position in XYZ, can contain tangent angle in W.
@@ -863,6 +869,12 @@ void main() {
 #define SHADER_IS_SRGB false
 #define SHADER_SPACE_FAR 0.0
 
+#ifdef USE_MULTIVIEW
+#define OUTPUT_IS_MULTIVIEW true
+#else
+#define OUTPUT_IS_MULTIVIEW false
+#endif
+
 /* Include half precision types. */
 #include "../half_inc.glsl"
 
@@ -1079,7 +1091,7 @@ layout(location = 2) out vec2 motion_vector;
 vec4 volumetric_fog_process(vec2 screen_uv, float z) {
 	vec3 fog_pos = vec3(screen_uv, z * implementation_data.volumetric_fog_inv_length);
 	if (fog_pos.z < 0.0) {
-		return vec4(0.0);
+		return vec4(0.0, 0.0, 0.0, 1.0);
 	} else if (fog_pos.z < 1.0) {
 		fog_pos.z = pow(fog_pos.z, implementation_data.volumetric_fog_detail_spread);
 	}
@@ -1225,9 +1237,7 @@ void fragment_shader(in SceneData scene_data) {
 	float anisotropy = 0.0;
 	vec2 anisotropy_flow = vec2(1.0, 0.0);
 	vec3 energy_compensation = vec3(1.0);
-#ifndef FOG_DISABLED
 	vec4 fog = vec4(0.0, 0.0, 0.0, 1.0);
-#endif // !FOG_DISABLED
 #if defined(CUSTOM_RADIANCE_USED)
 	vec4 custom_radiance = vec4(0.0);
 #endif
