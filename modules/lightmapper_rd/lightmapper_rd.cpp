@@ -38,8 +38,10 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/math/geometry_2d.h"
+#ifdef TOOLS_ENABLED // <ELIM> OIDN denoising is editor-only; runtime bakes use JNLM.
 #include "editor/file_system/editor_paths.h"
 #include "editor/settings/editor_settings.h"
+#endif // </ELIM>
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_server_globals.h"
 
@@ -846,6 +848,7 @@ LightmapperRD::BakeError LightmapperRD::_pack_l1(RenderingDevice *rd, Ref<RDShad
 	return BAKE_OK;
 }
 
+#ifdef TOOLS_ENABLED // <ELIM> PFM round-trip + OIDN exec are editor-only.
 Error LightmapperRD::_store_pfm(RenderingDevice *p_rd, RID p_atlas_tex, int p_index, const Size2i &p_atlas_size, const String &p_name, bool p_shadowmask) {
 	Vector<uint8_t> data = p_rd->texture_get_data(p_atlas_tex, p_index);
 	Ref<Image> img = Image::create_from_data(p_atlas_size.width, p_atlas_size.height, false, p_shadowmask ? Image::FORMAT_RGBA8 : Image::FORMAT_RGBAH, data);
@@ -970,6 +973,7 @@ LightmapperRD::BakeError LightmapperRD::_denoise_oidn(RenderingDevice *p_rd, RID
 	}
 	return BAKE_OK;
 }
+#endif // TOOLS_ENABLED </ELIM>
 
 LightmapperRD::BakeError LightmapperRD::_denoise(RenderingDevice *p_rd, Ref<RDShaderFile> &p_compute_shader, const RID &p_compute_base_uniform_set, PushConstant &p_push_constant, RID p_source_light_tex, RID p_source_normal_tex, RID p_dest_light_tex, RID p_unocclude_tex, float p_denoiser_strength, int p_denoiser_range, const Size2i &p_atlas_size, int p_atlas_slices, bool p_bake_sh, BakeStepFunc p_step_function, void *p_bake_userdata) {
 	RID denoise_params_buffer = p_rd->uniform_buffer_create(sizeof(DenoiseParams));
@@ -1060,7 +1064,15 @@ LightmapperRD::BakeError LightmapperRD::_denoise(RenderingDevice *p_rd, Ref<RDSh
 
 LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function, void *p_bake_userdata, float p_exposure_normalization, float p_supersampling_factor) {
 	int denoiser = GLOBAL_GET("rendering/lightmapping/denoising/denoiser");
-	String oidn_path = EDITOR_GET("filesystem/tools/oidn/oidn_denoise_path");
+#ifdef TOOLS_ENABLED // <ELIM> OIDN setup is editor-only; runtime bakes force JNLM.
+	// EditorSettings only exists when the editor UI itself is running;
+	// a game launched from the editor binary (runtime bakes) must not touch it.
+	String oidn_path;
+	if (EditorSettings::get_singleton() != nullptr) {
+		oidn_path = EDITOR_GET("filesystem/tools/oidn/oidn_denoise_path");
+	} else {
+		denoiser = 0; // JNLM — OIDN is editor-only.
+	}
 
 	if (p_use_denoiser && denoiser == 1) {
 		// OIDN (external).
@@ -1075,6 +1087,10 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		}
 		ERR_FAIL_COND_V_MSG(oidn_path.is_empty() || !da->file_exists(oidn_path), BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES, "OIDN denoiser is selected in the project settings, but no or invalid OIDN executable path is configured in the editor settings.");
 	}
+#else
+	// Runtime bakes always use the built-in JNLM compute denoiser.
+	denoiser = 0;
+#endif // </ELIM>
 
 	if (p_step_function) {
 		p_step_function(0.0, RTR("Begin Bake"), p_bake_userdata, true);
@@ -2094,10 +2110,13 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 		{
 			BakeError error;
+#ifdef TOOLS_ENABLED // <ELIM> OIDN dispatch is editor-only.
 			if (denoiser == 1) {
 				// OIDN (external).
 				error = _denoise_oidn(rd, light_accum_tex, normal_tex, light_accum_tex, atlas_size, atlas_slices, p_bake_sh, false, oidn_path);
-			} else {
+			} else
+#endif // </ELIM>
+			{
 				// JNLM (built-in).
 				SWAP(light_accum_tex, light_accum_tex2);
 				error = _denoise(rd, compute_shader, compute_base_uniform_set, push_constant, light_accum_tex2, normal_tex, light_accum_tex, unocclude_tex, p_denoiser_strength, p_denoiser_range, atlas_size, atlas_slices, p_bake_sh, p_step_function, p_bake_userdata);
@@ -2109,10 +2128,13 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 		if (p_bake_shadowmask) {
 			BakeError error;
+#ifdef TOOLS_ENABLED // <ELIM> OIDN dispatch is editor-only.
 			if (denoiser == 1) {
 				// OIDN (external).
 				error = _denoise_oidn(rd, shadowmask_tex, normal_tex, shadowmask_tex, atlas_size, atlas_slices, false, true, oidn_path);
-			} else {
+			} else
+#endif // </ELIM>
+			{
 				// JNLM (built-in).
 				SWAP(shadowmask_tex, shadowmask_tex2);
 				error = _denoise(rd, compute_shader, compute_base_uniform_set, push_constant, shadowmask_tex2, normal_tex, shadowmask_tex, unocclude_tex, p_denoiser_strength, p_denoiser_range, atlas_size, atlas_slices, false, p_step_function, p_bake_userdata);

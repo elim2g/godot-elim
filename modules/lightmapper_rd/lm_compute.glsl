@@ -230,8 +230,14 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out
 									return RAY_ANY;
 								}
 								vec3 position = p_from + dir * distance;
-								vec3 hit_cell = (position - bake_params.to_cell_offset) * bake_params.to_cell_size;
-								if (icell != ivec3(hit_cell)) {
+								// <ELIM> Clamp the hit cell into the grid. Faces lying exactly on
+								// the scene AABB's max planes (every map's outer shell) compute a
+								// hit_cell of grid_size — outside the grid, never equal to any
+								// traversal cell — so upstream silently ignores ALL hits on them
+								// and rays escape through the map's roof/outer walls.
+								ivec3 hit_cell = clamp(ivec3((position - bake_params.to_cell_offset) * bake_params.to_cell_size), ivec3(0), ivec3(bake_params.grid_size) - ivec3(1));
+								if (icell != hit_cell) {
+									// </ELIM>
 									// It's possible for the ray to hit a triangle in a position outside the bounds of the cell
 									// if it's large enough to cover multiple ones. The hit must be ignored if this is the case.
 									continue;
@@ -322,6 +328,14 @@ uint trace_ray_closest_hit_triangle_albedo_alpha(vec3 p_from, vec3 p_to, out vec
 		vec3 uvw = vec3(barycentric.x * vert0.uv + barycentric.y * vert1.uv + barycentric.z * vert2.uv, float(triangles.data[tidx].slice));
 
 		albedo_alpha = textureLod(sampler2DArray(albedo_tex, linear_sampler), uvw, 0);
+		// <ELIM> TURNT bakes no transparent surfaces (CLEAR "windows" are faces
+		// removed from the mesh), so every hit is opaque. Without this, hits
+		// near a chart edge bilinearly mix the gutter's alpha=0 into the
+		// sample, fabricating a translucent border around EVERY face — texels
+		// are meters wide here, so the sun partially shines through a band at
+		// every brush seam ("light bleeding everywhere").
+		albedo_alpha.a = 1.0;
+		// </ELIM>
 		hit_position = barycentric.x * vert0.position + barycentric.y * vert1.position + barycentric.z * vert2.position;
 	}
 
@@ -475,6 +489,17 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 		return;
 	}
 
+	// <ELIM> The AA/penumbra sampling below jitters ray origins across the
+	// texel footprint and advances them along the ray by bias + |disk_sample|.
+	// That is sized for cm-scale texels; TURNT texels are meters, so an
+	// un-capped jitter relocates origins through walls/ceilings and the sun
+	// lights sealed interiors (one-texel bleed bands at every corner the sun
+	// grazes). Cap the jitter in world units; below the cap behavior is
+	// identical to upstream.
+	const float MAX_AA_JITTER_WS = 0.05;
+	float aa_texel_size = min(p_texel_size, MAX_AA_JITTER_WS);
+	// </ELIM>
+
 	float penumbra = 0.0;
 	vec3 penumbra_color = vec3(0.0);
 	if (p_soft_shadowing) {
@@ -499,7 +524,7 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 		float aa_power = 0.0;
 		for (uint i = 0; i < ray_count; i++) {
 			// Create a random sample within the texel.
-			vec2 disk_sample = (halton_map[i] - vec2(0.5)) * p_texel_size * light_data.shadow_blur;
+			vec2 disk_sample = (halton_map[i] - vec2(0.5)) * aa_texel_size * light_data.shadow_blur; // <ELIM> capped, see above.
 			// Align the sample to world space.
 			vec3 disk_aligned = (disk_sample.x * tangent + disk_sample.y * bitan);
 			vec3 origin = p_position - disk_aligned;
@@ -712,6 +737,7 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 #endif
 
 			vec4 albedo_alpha = textureLod(sampler2DArray(albedo_tex, linear_sampler), uvw, 0).rgba;
+			albedo_alpha.a = 1.0; // <ELIM> Opaque bake: no translucent chart-edge borders (see trace_ray_closest_hit_triangle_albedo_alpha).
 			vec3 emissive = textureLod(sampler2DArray(emission_tex, linear_sampler), uvw, 0).rgb;
 			emissive *= bake_params.exposure_normalization;
 
@@ -752,54 +778,15 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 			light += throughput * trace_environment_color(ray_dir);
 			break;
 		} else if (trace_result == RAY_BACK) {
-			Vertex vert0 = vertices.data[triangles.data[tidx].indices.x];
-			Vertex vert1 = vertices.data[triangles.data[tidx].indices.y];
-			Vertex vert2 = vertices.data[triangles.data[tidx].indices.z];
-			vec3 uvw = vec3(barycentric.x * vert0.uv + barycentric.y * vert1.uv + barycentric.z * vert2.uv, float(triangles.data[tidx].slice));
-			position = barycentric.x * vert0.position + barycentric.y * vert1.position + barycentric.z * vert2.position;
-
-			vec4 albedo_alpha = textureLod(sampler2DArray(albedo_tex, linear_sampler), uvw, 0).rgba;
-
-			if (albedo_alpha.a > 1.0) {
-				break;
-			}
-
-			transparency_rays_left -= 1;
-			depth -= 1;
-			if (transparency_rays_left <= 0) {
-				break;
-			}
-
-			vec3 norm0 = vec3(vert0.normal_xy, vert0.normal_z);
-			vec3 norm1 = vec3(vert1.normal_xy, vert1.normal_z);
-			vec3 norm2 = vec3(vert2.normal_xy, vert2.normal_z);
-			vec3 normal = barycentric.x * norm0 + barycentric.y * norm1 + barycentric.z * norm2;
-
-			vec3 direct_light = vec3(0.0f);
-#ifdef USE_LIGHT_TEXTURE_FOR_BOUNCES
-			direct_light += textureLod(sampler2DArray(source_light, linear_sampler), uvw, 0.0).rgb;
-#else
-			// Trace the lights directly. Significantly more expensive but more accurate in scenarios
-			// where the lightmap texture isn't reliable.
-			for (uint i = 0; i < bake_params.light_count; i++) {
-				vec3 light;
-				vec3 light_dir;
-				float shadow;
-				trace_direct_light(position, normal, i, false, light, light_dir, r_noise, p_texel_size, shadow);
-				direct_light += light * lights.data[i].indirect_energy;
-			}
-
-			direct_light *= bake_params.exposure_normalization;
-#endif
-
-			vec3 emissive = textureLod(sampler2DArray(emission_tex, linear_sampler), uvw, 0).rgb;
-			emissive *= bake_params.exposure_normalization;
-
-			light += throughput * emissive * albedo_alpha.a;
-			throughput = mix(mix(throughput, throughput * albedo_alpha.rgb, albedo_alpha.a), vec3(0.0), albedo_alpha.a);
-			light += throughput * direct_light * bake_params.bounce_indirect_energy * albedo_alpha.a;
-
-			position += ray_dir * bake_params.bias;
+			// <ELIM> Opaque bake: a backface hit means the ray entered solid
+			// geometry — terminate. Upstream tests the hit's albedo alpha to
+			// support transparent surfaces, but that sample is gutter-
+			// contaminated near chart edges (bilinear mixes the gutter's
+			// alpha=0 in), letting rays continue straight through walls.
+			// TURNT bakes no transparent surfaces, so the upstream
+			// transparency continuation block is removed entirely.
+			break;
+			// </ELIM>
 		}
 	}
 
@@ -828,6 +815,12 @@ void main() {
 	if (length(normal) < 0.5) {
 		return; //empty texel, no process
 	}
+	// <ELIM> Texels killed by the unocclude pass (buried in overlapping brush
+	// geometry) stay empty so the dilate pass fills them from visible neighbors.
+	if (texelFetch(sampler2DArray(source_position, linear_sampler), ivec3(atlas_pos, params.atlas_slice), 0).w < 0.5) {
+		return;
+	}
+	// </ELIM>
 	vec3 position = texelFetch(sampler2DArray(source_position, linear_sampler), ivec3(atlas_pos, params.atlas_slice), 0).xyz;
 	vec4 neighbor_position = texelFetch(sampler2DArray(source_position, linear_sampler), ivec3(atlas_pos + ivec2(1, 0), params.atlas_slice), 0).xyzw;
 
@@ -939,6 +932,12 @@ void main() {
 	vec3 light_accum = vec3(0.0);
 #endif
 
+	// <ELIM> Buried texels (killed by the unocclude pass) stay empty.
+	if (texelFetch(sampler2DArray(source_position, linear_sampler), ivec3(atlas_pos, params.atlas_slice), 0).w < 0.5) {
+		return;
+	}
+	// </ELIM>
+
 	// Retrieve starting normal and position.
 	vec3 normal = texelFetch(sampler2DArray(source_normal, linear_sampler), ivec3(atlas_pos, params.atlas_slice), 0).xyz;
 	if (length(normal) < 0.5) {
@@ -1024,9 +1023,16 @@ void main() {
 		if (trace_ray_closest_hit_distance(base_pos, ray_to, d, norm) == RAY_BACK) {
 			unocclude_mask = 1.0;
 			if (d <= texel_size && d < min_d) {
-				// This bias needs to be greater than the regular bias, because otherwise later, rays will go the other side when pointing back.
-				vertex_pos = base_pos + rays[i] * d + norm * bake_params.bias * 10.0;
+				// <ELIM> Buried texel: its sample point sits inside overlapping
+				// brush geometry (Quake-style maps never CSG-clip brushes, so
+				// faces continue beneath their neighbors). Upstream relocates
+				// the point out of the solid, which on thin outer shells often
+				// lands on the SUNLIT side and bleeds light across every seam
+				// via bilinear filtering. Kill the texel instead — the dilate
+				// pass fills it from its visible same-chart neighbors.
+				position_alpha.a = 0.0;
 				min_d = d;
+				// </ELIM>
 			}
 		}
 	}

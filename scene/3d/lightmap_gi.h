@@ -347,6 +347,10 @@ public:
 
 	BakeError bake(Node *p_from_node, String p_image_data_path = "", Lightmapper::BakeStepFunc p_bake_step = nullptr, void *p_bake_userdata = nullptr);
 
+	// <ELIM> Script-facing bake with Callable progress; upstream leaves bake()
+	// unbound. See claude-docs/GODOT_RUNTIME_LIGHTMAP_BAKE_PATCH.md.
+	BakeError bake_scripted(Node *p_from_node = nullptr, const String &p_image_data_path = "", const Callable &p_progress = Callable()); // </ELIM>
+
 	virtual PackedStringArray get_configuration_warnings() const override;
 
 	LightmapGI();

@@ -30,6 +30,7 @@
 
 #include "lightmap_gi.h"
 
+#include "core/config/engine.h" // <ELIM> Runtime bake path.
 #include "core/config/project_settings.h"
 #include "core/io/config_file.h"
 #include "core/math/delaunay_3d.h"
@@ -342,6 +343,12 @@ void LightmapGIData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("add_user", "path", "uv_scale", "slice_index", "sub_instance"), &LightmapGIData::add_user);
 	ClassDB::bind_method(D_METHOD("get_user_count"), &LightmapGIData::get_user_count);
 	ClassDB::bind_method(D_METHOD("get_user_path", "user_idx"), &LightmapGIData::get_user_path);
+	// <ELIM> Expose the per-user atlas placement so runtime tooling/tests can
+	// map atlas texels back to mesh UV2 (upstream binds only path/count).
+	ClassDB::bind_method(D_METHOD("get_user_sub_instance", "user_idx"), &LightmapGIData::get_user_sub_instance);
+	ClassDB::bind_method(D_METHOD("get_user_lightmap_uv_scale", "user_idx"), &LightmapGIData::get_user_lightmap_uv_scale);
+	ClassDB::bind_method(D_METHOD("get_user_lightmap_slice_index", "user_idx"), &LightmapGIData::get_user_lightmap_slice_index);
+	// </ELIM>
 	ClassDB::bind_method(D_METHOD("clear_users"), &LightmapGIData::clear_users);
 
 	ClassDB::bind_method(D_METHOD("_set_probe_data", "data"), &LightmapGIData::_set_probe_data);
@@ -471,7 +478,9 @@ void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &m
 
 	for (int i = 0; i < p_at_node->get_child_count(); i++) {
 		Node *child = p_at_node->get_child(i);
-		if (!child->get_owner()) {
+		// <ELIM> The owner filter assumes editor scenes (skips gizmo helpers).
+		// Runtime-built nodes have no owner, so only apply it in the editor.
+		if (!child->get_owner() && Engine::get_singleton()->is_editor_hint()) { // </ELIM>
 			continue; //maybe a helper
 		}
 
@@ -823,6 +832,30 @@ LightmapGI::BakeError LightmapGI::_save_and_reimport_atlas_textures(const Ref<Li
 	for (int i = 0; i < images.size(); i++) {
 		images.set(i, p_is_shadowmask ? p_lightmapper->get_shadowmask_texture(i) : p_lightmapper->get_bake_texture(i));
 	}
+
+	// <ELIM> Runtime bake path: the editor pipeline below writes EXR/PNG atlases
+	// and round-trips them through the resource importer, which only exists in
+	// the editor. At runtime pack the atlas slices directly into one embedded
+	// Texture2DArray (no Image::MAX_HEIGHT stacking constraint applies).
+	if (!Engine::get_singleton()->is_editor_hint()) {
+		Vector<Ref<Image>> slices;
+		for (int i = 0; i < images.size(); i++) {
+			Ref<Image> slice = images[i];
+			if (supersampling_enabled) {
+				slice = slice->duplicate();
+				slice->resize(slice->get_width() / supersampling_factor, slice->get_height() / supersampling_factor, Image::INTERPOLATE_TRILINEAR);
+			}
+			slices.push_back(slice);
+		}
+		Ref<Texture2DArray> runtime_texture;
+		runtime_texture.instantiate();
+		const Error tex_err = runtime_texture->create_from_images(slices);
+		ERR_FAIL_COND_V(tex_err != OK, LightmapGI::BAKE_ERROR_CANT_CREATE_IMAGE);
+		r_textures.resize(1);
+		r_textures[0] = runtime_texture;
+		return LightmapGI::BAKE_ERROR_OK;
+	}
+	// </ELIM>
 
 	const int slice_count = images.size();
 	const int slice_width = images[0]->get_width();
@@ -1225,7 +1258,7 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	// Add everything to lightmapper
 	if (environment_mode != ENVIRONMENT_MODE_DISABLED) {
 		if (p_bake_step) {
-			p_bake_step(4.1, RTR("Preparing Environment"), p_bake_userdata, true);
+			p_bake_step(0.41, RTR("Preparing Environment"), p_bake_userdata, true); // <ELIM> Upstream typo: was 4.1 (409% in progress UIs).
 		}
 
 		environment_transform = get_global_transform().basis;
@@ -1501,6 +1534,29 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 
 	return BAKE_ERROR_OK;
 }
+
+// <ELIM> Bridges Lightmapper::BakeStepFunc to a script Callable. The Callable
+// receives (completion: float, step: String); returning true cancels the bake.
+static bool _bake_step_to_callable(float p_completion, const String &p_text, void *p_ud, bool p_refresh) {
+	const Callable *callable = (const Callable *)p_ud;
+	Variant completion = p_completion;
+	Variant text = p_text;
+	const Variant *args[2] = { &completion, &text };
+	Variant ret;
+	Callable::CallError ce;
+	callable->callp(args, 2, ret, ce);
+	return ce.error == Callable::CallError::CALL_OK && ret.operator bool();
+}
+
+// Script-facing bake.
+LightmapGI::BakeError LightmapGI::bake_scripted(Node *p_from_node, const String &p_image_data_path, const Callable &p_progress) {
+	if (p_progress.is_valid()) {
+		Callable progress = p_progress;
+		return bake(p_from_node, p_image_data_path, _bake_step_to_callable, &progress);
+	}
+	return bake(p_from_node, p_image_data_path);
+}
+// </ELIM>
 
 void LightmapGI::_notification(int p_what) {
 	switch (p_what) {
@@ -1914,6 +1970,8 @@ void LightmapGI::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_camera_attributes"), &LightmapGI::get_camera_attributes);
 
 	//	ClassDB::bind_method(D_METHOD("bake", "from_node"), &LightmapGI::bake, DEFVAL(Variant()));
+	// <ELIM> Runtime bake binding (upstream keeps the line above commented out).
+	ClassDB::bind_method(D_METHOD("bake", "from_node", "image_data_path", "progress"), &LightmapGI::bake_scripted, DEFVAL(Variant()), DEFVAL(String()), DEFVAL(Callable())); // </ELIM>
 
 	ADD_GROUP("Tweaks", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "quality", PROPERTY_HINT_ENUM, "Low,Medium,High,Ultra"), "set_bake_quality", "get_bake_quality");
