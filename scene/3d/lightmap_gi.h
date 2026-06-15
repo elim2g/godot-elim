@@ -210,6 +210,23 @@ private:
 	Ref<LightmapGIData> light_data;
 	Node *last_owner = nullptr;
 
+	// <ELIM> Threaded bake: bake() is split into prepare (MAIN) / gpu (WORKER) /
+	// finalize (MAIN) phases so a script can run the GPU bake on a Thread while
+	// the main loop keeps rendering a live progress bar. The intermediate state
+	// produced by prepare and consumed by gpu + finalize lives on the node (one
+	// bake per node at a time). See claude-docs/LIGHTMAP_THREADED_BAKE.md.
+	struct BakeState {
+		Ref<Lightmapper> lightmapper;
+		String image_data_path;
+		AABB bounds;
+		Ref<Image> environment_image;
+		Basis environment_transform;
+		float exposure_normalization = 1.0;
+		Lightmapper::BakeError gpu_err = Lightmapper::BAKE_OK;
+	};
+	BakeState *pending_bake = nullptr;
+	// </ELIM>
+
 	struct LightsFound {
 		Transform3D xform;
 		Light3D *light = nullptr;
@@ -270,6 +287,12 @@ private:
 	void _gen_new_positions_from_octree(const GenProbesOctree *p_cell, float p_cell_size, const Vector<Vector3> &probe_positions, LocalVector<Vector3> &new_probe_positions, HashMap<Vector3i, bool> &positions_used, const AABB &p_bounds);
 
 	BakeError _save_and_reimport_atlas_textures(const Ref<Lightmapper> p_lightmapper, const String &p_base_name, TypedArray<TextureLayered> &r_textures, bool p_is_shadowmask = false) const;
+
+	// <ELIM> The three phases bake() is split into (see BakeState above).
+	BakeError _bake_prepare_internal(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata, BakeState &r_state);
+	void _bake_gpu_internal(BakeState &p_state, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata);
+	BakeError _bake_finalize_internal(BakeState &p_state, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata);
+	// </ELIM>
 
 protected:
 	void _validate_property(PropertyInfo &p_property) const;
@@ -351,9 +374,22 @@ public:
 	// unbound. See claude-docs/GODOT_RUNTIME_LIGHTMAP_BAKE_PATCH.md.
 	BakeError bake_scripted(Node *p_from_node = nullptr, const String &p_image_data_path = "", const Callable &p_progress = Callable()); // </ELIM>
 
+	// <ELIM> Threaded bake phases (script-facing). A script calls bake_prepare on
+	// the main thread, runs bake_gpu on a Thread, then bake_finalize back on the
+	// main thread. The progress Callable receives (completion: float, step:
+	// String) and returns true to cancel; during bake_gpu it is invoked from the
+	// worker thread, so it must only touch thread-safe state. See
+	// claude-docs/LIGHTMAP_THREADED_BAKE.md.
+	BakeError bake_prepare(Node *p_from_node = nullptr, const String &p_image_data_path = "", const Callable &p_progress = Callable());
+	BakeError bake_gpu(const Callable &p_progress = Callable());
+	BakeError bake_finalize();
+	void bake_abort();
+	// </ELIM>
+
 	virtual PackedStringArray get_configuration_warnings() const override;
 
 	LightmapGI();
+	~LightmapGI(); // <ELIM> frees any in-flight threaded-bake state
 };
 
 VARIANT_ENUM_CAST(LightmapGIData::ShadowmaskMode);

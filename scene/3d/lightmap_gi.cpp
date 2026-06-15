@@ -926,7 +926,25 @@ LightmapGI::BakeError LightmapGI::_save_and_reimport_atlas_textures(const Ref<Li
 	return LightmapGI::BAKE_ERROR_OK;
 }
 
+// <ELIM> bake() is now a thin orchestrator over three phases that the threaded
+// script path (bake_prepare/bake_gpu/bake_finalize) drives separately. The
+// synchronous path runs all three back-to-back on the calling thread, so its
+// behavior is identical to upstream. See claude-docs/LIGHTMAP_THREADED_BAKE.md.
 LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata) {
+	BakeState state;
+	BakeError prep_err = _bake_prepare_internal(p_from_node, p_image_data_path, p_bake_step, p_bake_userdata, state);
+	if (prep_err != BAKE_ERROR_OK) {
+		return prep_err;
+	}
+	_bake_gpu_internal(state, p_bake_step, p_bake_userdata);
+	return _bake_finalize_internal(state, p_bake_step, p_bake_userdata);
+}
+
+// PHASE 1 (MAIN THREAD): mesh/light discovery, the per-mesh RS::bake_render_uv2
+// render, probe generation, and the environment panorama — everything that
+// depends on the global RenderingServer or the scene tree. Populates the
+// lightmapper and the shared BakeState; no GPU bake happens here.
+LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata, BakeState &r_state) {
 	if (p_image_data_path.is_empty()) {
 		if (get_light_data().is_null()) {
 			return BAKE_ERROR_NO_SAVE_PATH;
@@ -937,15 +955,12 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 			return BAKE_ERROR_NO_SAVE_PATH;
 		}
 	}
+	r_state.image_data_path = p_image_data_path;
 
 	Ref<Lightmapper> lightmapper = Lightmapper::create();
 	ERR_FAIL_COND_V(lightmapper.is_null(), BAKE_ERROR_NO_LIGHTMAPPER);
-
-	BakeStepUD bsud;
-	bsud.func = p_bake_step;
-	bsud.ud = p_bake_userdata;
-	bsud.from_percent = 0.2;
-	bsud.to_percent = 0.8;
+	r_state.lightmapper = lightmapper;
+	// </ELIM>
 
 	if (p_bake_step) {
 		p_bake_step(0.0, RTR("Finding meshes, lights and probes"), p_bake_userdata, true);
@@ -1308,19 +1323,49 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 		}
 	}
 
-	Lightmapper::BakeError bake_err = lightmapper->bake(Lightmapper::BakeQuality(bake_quality), use_denoiser, denoiser_strength, denoiser_range, bounces,
-			bounce_indirect_energy, bias, max_texture_size, directional, shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE, use_texture_for_bounces,
-			Lightmapper::GenerateProbes(gen_probes), environment_image, environment_transform, _lightmap_bake_step_function, &bsud, exposure_normalization, (supersampling_enabled ? supersampling_factor : 1));
+	// <ELIM> Hand the prepared inputs to the worker (gpu) + finalize phases.
+	r_state.bounds = bounds;
+	r_state.environment_image = environment_image;
+	r_state.environment_transform = environment_transform;
+	r_state.exposure_normalization = exposure_normalization;
+	return BAKE_ERROR_OK;
+}
 
-	if (bake_err == Lightmapper::BAKE_ERROR_TEXTURE_EXCEEDS_MAX_SIZE) {
+// PHASE 2 (WORKER-THREAD SAFE): the GPU bake. LightmapperRD::bake() creates its
+// OWN local RenderingDevice on the calling thread and makes no global RS/RD
+// calls, so this runs on a script Thread while the main loop keeps rendering.
+// Stores the raw lightmapper result on the BakeState.
+void LightmapGI::_bake_gpu_internal(BakeState &p_state, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata) {
+	BakeStepUD bsud;
+	bsud.func = p_bake_step;
+	bsud.ud = p_bake_userdata;
+	bsud.from_percent = 0.2;
+	bsud.to_percent = 0.8;
+
+	p_state.gpu_err = p_state.lightmapper->bake(Lightmapper::BakeQuality(bake_quality), use_denoiser, denoiser_strength, denoiser_range, bounces,
+			bounce_indirect_energy, bias, max_texture_size, directional, shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE, use_texture_for_bounces,
+			Lightmapper::GenerateProbes(gen_probes), p_state.environment_image, p_state.environment_transform, _lightmap_bake_step_function, &bsud, p_state.exposure_normalization, (supersampling_enabled ? supersampling_factor : 1));
+}
+
+// PHASE 3 (MAIN THREAD): everything that touches the global RS or the scene
+// tree again — building the embedded Texture2DArray, assembling + saving the
+// LightmapGIData, and assigning it back onto the instances.
+LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata) {
+	Ref<Lightmapper> lightmapper = p_state.lightmapper;
+	AABB bounds = p_state.bounds;
+	float exposure_normalization = p_state.exposure_normalization;
+	String p_image_data_path = p_state.image_data_path;
+
+	if (p_state.gpu_err == Lightmapper::BAKE_ERROR_TEXTURE_EXCEEDS_MAX_SIZE) {
 		return BAKE_ERROR_TEXTURE_SIZE_TOO_SMALL;
-	} else if (bake_err == Lightmapper::BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES) {
+	} else if (p_state.gpu_err == Lightmapper::BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES) {
 		return BAKE_ERROR_MESHES_INVALID;
-	} else if (bake_err == Lightmapper::BAKE_ERROR_ATLAS_TOO_SMALL) {
+	} else if (p_state.gpu_err == Lightmapper::BAKE_ERROR_ATLAS_TOO_SMALL) {
 		return BAKE_ERROR_ATLAS_TOO_SMALL;
-	} else if (bake_err == Lightmapper::BAKE_ERROR_USER_ABORTED) {
+	} else if (p_state.gpu_err == Lightmapper::BAKE_ERROR_USER_ABORTED) {
 		return BAKE_ERROR_USER_ABORTED;
 	}
+	// </ELIM>
 
 	// POSTBAKE: Save Textures.
 	TypedArray<TextureLayered> lightmap_textures;
@@ -1555,6 +1600,68 @@ LightmapGI::BakeError LightmapGI::bake_scripted(Node *p_from_node, const String 
 		return bake(p_from_node, p_image_data_path, _bake_step_to_callable, &progress);
 	}
 	return bake(p_from_node, p_image_data_path);
+}
+
+// Threaded bake phases. The intermediate state lives on the node (one bake per
+// node at a time). bake_prepare/bake_finalize must run on the main thread;
+// bake_gpu is safe to call from a worker Thread. The progress Callable is
+// invoked synchronously within each call, so passing &progress (a local) is
+// safe even for bake_gpu.
+LightmapGI::BakeError LightmapGI::bake_prepare(Node *p_from_node, const String &p_image_data_path, const Callable &p_progress) {
+	if (pending_bake) {
+		memdelete(pending_bake);
+		pending_bake = nullptr;
+	}
+	pending_bake = memnew(BakeState);
+
+	Callable progress = p_progress;
+	Lightmapper::BakeStepFunc step = p_progress.is_valid() ? _bake_step_to_callable : nullptr;
+	void *ud = p_progress.is_valid() ? (void *)&progress : nullptr;
+
+	BakeError err = _bake_prepare_internal(p_from_node, p_image_data_path, step, ud, *pending_bake);
+	if (err != BAKE_ERROR_OK) {
+		memdelete(pending_bake);
+		pending_bake = nullptr;
+	}
+	return err;
+}
+
+LightmapGI::BakeError LightmapGI::bake_gpu(const Callable &p_progress) {
+	ERR_FAIL_NULL_V_MSG(pending_bake, BAKE_ERROR_NO_SCENE_ROOT, "LightmapGI.bake_gpu() called without a successful bake_prepare().");
+
+	Callable progress = p_progress;
+	Lightmapper::BakeStepFunc step = p_progress.is_valid() ? _bake_step_to_callable : nullptr;
+	void *ud = p_progress.is_valid() ? (void *)&progress : nullptr;
+
+	_bake_gpu_internal(*pending_bake, step, ud);
+
+	switch (pending_bake->gpu_err) {
+		case Lightmapper::BAKE_ERROR_TEXTURE_EXCEEDS_MAX_SIZE:
+			return BAKE_ERROR_TEXTURE_SIZE_TOO_SMALL;
+		case Lightmapper::BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES:
+			return BAKE_ERROR_MESHES_INVALID;
+		case Lightmapper::BAKE_ERROR_ATLAS_TOO_SMALL:
+			return BAKE_ERROR_ATLAS_TOO_SMALL;
+		case Lightmapper::BAKE_ERROR_USER_ABORTED:
+			return BAKE_ERROR_USER_ABORTED;
+		default:
+			return BAKE_ERROR_OK;
+	}
+}
+
+LightmapGI::BakeError LightmapGI::bake_finalize() {
+	ERR_FAIL_NULL_V_MSG(pending_bake, BAKE_ERROR_NO_SCENE_ROOT, "LightmapGI.bake_finalize() called without a successful bake_prepare().");
+	BakeError err = _bake_finalize_internal(*pending_bake, nullptr, nullptr);
+	memdelete(pending_bake);
+	pending_bake = nullptr;
+	return err;
+}
+
+void LightmapGI::bake_abort() {
+	if (pending_bake) {
+		memdelete(pending_bake);
+		pending_bake = nullptr;
+	}
 }
 // </ELIM>
 
@@ -1973,6 +2080,13 @@ void LightmapGI::_bind_methods() {
 	// <ELIM> Runtime bake binding (upstream keeps the line above commented out).
 	ClassDB::bind_method(D_METHOD("bake", "from_node", "image_data_path", "progress"), &LightmapGI::bake_scripted, DEFVAL(Variant()), DEFVAL(String()), DEFVAL(Callable())); // </ELIM>
 
+	// <ELIM> Threaded bake phases (see claude-docs/LIGHTMAP_THREADED_BAKE.md).
+	ClassDB::bind_method(D_METHOD("bake_prepare", "from_node", "image_data_path", "progress"), &LightmapGI::bake_prepare, DEFVAL(Variant()), DEFVAL(String()), DEFVAL(Callable()));
+	ClassDB::bind_method(D_METHOD("bake_gpu", "progress"), &LightmapGI::bake_gpu, DEFVAL(Callable()));
+	ClassDB::bind_method(D_METHOD("bake_finalize"), &LightmapGI::bake_finalize);
+	ClassDB::bind_method(D_METHOD("bake_abort"), &LightmapGI::bake_abort);
+	// </ELIM>
+
 	ADD_GROUP("Tweaks", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "quality", PROPERTY_HINT_ENUM, "Low,Medium,High,Ultra"), "set_bake_quality", "get_bake_quality");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "supersampling"), "set_supersampling_enabled", "is_supersampling_enabled");
@@ -2032,3 +2146,13 @@ void LightmapGI::_bind_methods() {
 
 LightmapGI::LightmapGI() {
 }
+
+// <ELIM> Free any in-flight threaded-bake state (e.g. if the node is destroyed
+// after bake_prepare but before bake_finalize/bake_abort).
+LightmapGI::~LightmapGI() {
+	if (pending_bake) {
+		memdelete(pending_bake);
+		pending_bake = nullptr;
+	}
+}
+// </ELIM>
