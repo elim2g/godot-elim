@@ -38,13 +38,20 @@ vertices;
 #define CULL_FRONT 1
 #define CULL_BACK 2
 
+// <ELIM> Per-surface bake flags packed into Triangle.surface_flags (was pad1).
+#define SURFACE_FLAG_SKY 1u
+// </ELIM>
+
 struct Triangle {
 	uvec3 indices;
 	uint slice;
 	vec3 min_bounds;
 	uint cull_mode;
 	vec3 max_bounds;
-	uint pad1;
+	// <ELIM> was pad1; bit SURFACE_FLAG_SKY marks Q3-style sky faces.
+	// uint pad1;
+	uint surface_flags;
+	// </ELIM>
 };
 
 struct ClusterAABB {

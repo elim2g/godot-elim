@@ -389,7 +389,9 @@ public:
 	virtual PackedStringArray get_configuration_warnings() const override;
 
 	LightmapGI();
-	~LightmapGI(); // <ELIM> frees any in-flight threaded-bake state
+	// <ELIM> frees any in-flight threaded-bake state
+	~LightmapGI();
+	// </ELIM>
 };
 
 VARIANT_ENUM_CAST(LightmapGIData::ShadowmaskMode);

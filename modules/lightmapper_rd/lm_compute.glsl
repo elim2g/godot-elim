@@ -139,7 +139,10 @@ bool ray_box_test(vec3 p_from, vec3 p_inv_dir, vec3 p_box_min, vec3 p_box_max) {
 #define CLUSTER_TRIANGLE_ITERATION
 #endif
 
-uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out vec3 r_normal, out uint r_triangle, out vec3 r_barycentric) {
+// <ELIM> Added p_skip_sky: lets directional sun shadow rays pass through Q3 sky faces.
+// uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out vec3 r_normal, out uint r_triangle, out vec3 r_barycentric) {
+uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out float r_distance, out vec3 r_normal, out uint r_triangle, out vec3 r_barycentric) {
+// </ELIM>
 	// World coordinates.
 	vec3 rel = p_to - p_from;
 	float rel_len = length(rel);
@@ -215,6 +218,14 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out
 
 							uint triangle_index = triangle_indices.data[cluster_triangle_index];
 							Triangle triangle = triangles.data[triangle_index];
+
+							// <ELIM> Q3-style sky faces are "windows": directional sun
+							// shadow rays pass straight through them, so a sealed map
+							// gets sun inward without CLEAR-removing the faces.
+							if (p_skip_sky && (triangle.surface_flags & SURFACE_FLAG_SKY) != 0u) {
+								continue;
+							}
+							// </ELIM>
 
 							// Gather the triangle vertex positions.
 							vec3 vtx0 = vertices.data[triangle.indices.x].position;
@@ -310,16 +321,25 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out
 uint trace_ray_closest_hit_triangle(vec3 p_from, vec3 p_to, out uint r_triangle, out vec3 r_barycentric) {
 	float distance;
 	vec3 normal;
-	return trace_ray(p_from, p_to, false, distance, normal, r_triangle, r_barycentric);
+	// <ELIM> skip-sky arg (false: not a sun shadow ray).
+	// return trace_ray(p_from, p_to, false, distance, normal, r_triangle, r_barycentric);
+	return trace_ray(p_from, p_to, false, false, distance, normal, r_triangle, r_barycentric);
+	// </ELIM>
 }
 
-uint trace_ray_closest_hit_triangle_albedo_alpha(vec3 p_from, vec3 p_to, out vec4 albedo_alpha, out vec3 hit_position) {
+// <ELIM> Added p_skip_sky (forwarded to trace_ray) for sky-aware sun shadows.
+// uint trace_ray_closest_hit_triangle_albedo_alpha(vec3 p_from, vec3 p_to, out vec4 albedo_alpha, out vec3 hit_position) {
+uint trace_ray_closest_hit_triangle_albedo_alpha(vec3 p_from, vec3 p_to, bool p_skip_sky, out vec4 albedo_alpha, out vec3 hit_position) {
+// </ELIM>
 	float distance;
 	vec3 normal;
 	uint tidx;
 	vec3 barycentric;
 
-	uint ret = trace_ray(p_from, p_to, false, distance, normal, tidx, barycentric);
+	// <ELIM> forward p_skip_sky.
+	// uint ret = trace_ray(p_from, p_to, false, distance, normal, tidx, barycentric);
+	uint ret = trace_ray(p_from, p_to, false, p_skip_sky, distance, normal, tidx, barycentric);
+	// </ELIM>
 	if (ret != RAY_MISS) {
 		Vertex vert0 = vertices.data[triangles.data[tidx].indices.x];
 		Vertex vert1 = vertices.data[triangles.data[tidx].indices.y];
@@ -345,7 +365,10 @@ uint trace_ray_closest_hit_triangle_albedo_alpha(vec3 p_from, vec3 p_to, out vec
 uint trace_ray_closest_hit_distance(vec3 p_from, vec3 p_to, out float r_distance, out vec3 r_normal) {
 	uint triangle;
 	vec3 barycentric;
-	return trace_ray(p_from, p_to, false, r_distance, r_normal, triangle, barycentric);
+	// <ELIM> skip-sky arg (false).
+	// return trace_ray(p_from, p_to, false, r_distance, r_normal, triangle, barycentric);
+	return trace_ray(p_from, p_to, false, false, r_distance, r_normal, triangle, barycentric);
+	// </ELIM>
 }
 
 uint trace_ray_any_hit(vec3 p_from, vec3 p_to) {
@@ -353,7 +376,10 @@ uint trace_ray_any_hit(vec3 p_from, vec3 p_to) {
 	vec3 normal;
 	uint triangle;
 	vec3 barycentric;
-	return trace_ray(p_from, p_to, true, distance, normal, triangle, barycentric);
+	// <ELIM> skip-sky arg (false).
+	// return trace_ray(p_from, p_to, true, distance, normal, triangle, barycentric);
+	return trace_ray(p_from, p_to, true, false, distance, normal, triangle, barycentric);
+	// </ELIM>
 }
 
 // https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
@@ -450,6 +476,10 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 	float attenuation;
 	float soft_shadowing_disk_size;
 	Light light_data = lights.data[p_light_index];
+	// <ELIM> The directional sun treats sky faces as transparent so it reaches
+	// interiors through Q3-style sky apertures (no effect when no face is sky).
+	bool skip_sky = (light_data.type == LIGHT_TYPE_DIRECTIONAL);
+	// </ELIM>
 	if (light_data.type == LIGHT_TYPE_DIRECTIONAL) {
 		vec3 light_vec = light_data.direction;
 		light_pos = p_position - light_vec * length(bake_params.world_size);
@@ -524,7 +554,10 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 		float aa_power = 0.0;
 		for (uint i = 0; i < ray_count; i++) {
 			// Create a random sample within the texel.
-			vec2 disk_sample = (halton_map[i] - vec2(0.5)) * aa_texel_size * light_data.shadow_blur; // <ELIM> capped, see above.
+			// <ELIM> capped aa_texel_size (see above); was the unclamped p_texel_size.
+			// vec2 disk_sample = (halton_map[i] - vec2(0.5)) * p_texel_size * light_data.shadow_blur;
+			vec2 disk_sample = (halton_map[i] - vec2(0.5)) * aa_texel_size * light_data.shadow_blur;
+			// </ELIM>
 			// Align the sample to world space.
 			vec3 disk_aligned = (disk_sample.x * tangent + disk_sample.y * bitan);
 			vec3 origin = p_position - disk_aligned;
@@ -565,7 +598,10 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 						vec4 hit_albedo = vec4(1.0);
 						vec3 hit_position;
 						// Offset the ray origin for AA, offset the light position for soft shadows.
-						uint ret = trace_ray_closest_hit_triangle_albedo_alpha(origin - light_disk_to_point * (bake_params.bias + length(disk_sample)), p_position - light_disk_to_point * dist, hit_albedo, hit_position);
+						// <ELIM> pass skip_sky.
+						// uint ret = trace_ray_closest_hit_triangle_albedo_alpha(origin - light_disk_to_point * (bake_params.bias + length(disk_sample)), p_position - light_disk_to_point * dist, hit_albedo, hit_position);
+						uint ret = trace_ray_closest_hit_triangle_albedo_alpha(origin - light_disk_to_point * (bake_params.bias + length(disk_sample)), p_position - light_disk_to_point * dist, skip_sky, hit_albedo, hit_position);
+						// </ELIM>
 						if (ret == RAY_MISS) {
 							if (!sample_did_hit) {
 								sample_penumbra = 1.0;
@@ -606,7 +642,10 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 					vec4 hit_albedo = vec4(1.0);
 					vec3 hit_position;
 					// Offset the ray origin for AA, offset the light position for soft shadows.
-					uint ret = trace_ray_closest_hit_triangle_albedo_alpha(origin + light_dir * (bake_params.bias + length(disk_sample)), light_pos, hit_albedo, hit_position);
+					// <ELIM> pass skip_sky.
+					// uint ret = trace_ray_closest_hit_triangle_albedo_alpha(origin + light_dir * (bake_params.bias + length(disk_sample)), light_pos, hit_albedo, hit_position);
+					uint ret = trace_ray_closest_hit_triangle_albedo_alpha(origin + light_dir * (bake_params.bias + length(disk_sample)), light_pos, skip_sky, hit_albedo, hit_position);
+					// </ELIM>
 					if (ret == RAY_MISS) {
 						if (!sample_did_hit) {
 							sample_penumbra = 1.0;
@@ -646,7 +685,10 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 		for (uint iter = 0; iter < bake_params.transparency_rays; iter++) {
 			vec4 hit_albedo = vec4(1.0);
 			vec3 hit_position;
-			uint ret = trace_ray_closest_hit_triangle_albedo_alpha(p_position + r_light_dir * bake_params.bias, light_pos, hit_albedo, hit_position);
+			// <ELIM> pass skip_sky.
+			// uint ret = trace_ray_closest_hit_triangle_albedo_alpha(p_position + r_light_dir * bake_params.bias, light_pos, hit_albedo, hit_position);
+			uint ret = trace_ray_closest_hit_triangle_albedo_alpha(p_position + r_light_dir * bake_params.bias, light_pos, skip_sky, hit_albedo, hit_position);
+			// </ELIM>
 			if (ret == RAY_MISS) {
 				if (!did_hit) {
 					penumbra = 1.0;
@@ -706,6 +748,14 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 		vec3 barycentric;
 		uint trace_result = trace_ray_closest_hit_triangle(position + ray_dir * bake_params.bias, position + ray_dir * length(bake_params.world_size), tidx, barycentric);
 		if (trace_result == RAY_FRONT) {
+			// <ELIM> A bounce/probe ray that reaches a Q3-style sky face sees the
+			// environment (skylight) and stops, exactly like escaping to infinity.
+			// Sealed maps thus get sky ambient through sky apertures without CLEAR.
+			if ((triangles.data[tidx].surface_flags & SURFACE_FLAG_SKY) != 0u) {
+				light += throughput * trace_environment_color(ray_dir);
+				break;
+			}
+			// </ELIM>
 			Vertex vert0 = vertices.data[triangles.data[tidx].indices.x];
 			Vertex vert1 = vertices.data[triangles.data[tidx].indices.y];
 			Vertex vert2 = vertices.data[triangles.data[tidx].indices.z];
@@ -737,7 +787,9 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 #endif
 
 			vec4 albedo_alpha = textureLod(sampler2DArray(albedo_tex, linear_sampler), uvw, 0).rgba;
-			albedo_alpha.a = 1.0; // <ELIM> Opaque bake: no translucent chart-edge borders (see trace_ray_closest_hit_triangle_albedo_alpha).
+			// <ELIM> Opaque bake: no translucent chart-edge borders (see trace_ray_closest_hit_triangle_albedo_alpha).
+			albedo_alpha.a = 1.0;
+			// </ELIM>
 			vec3 emissive = textureLod(sampler2DArray(emission_tex, linear_sampler), uvw, 0).rgb;
 			emissive *= bake_params.exposure_normalization;
 

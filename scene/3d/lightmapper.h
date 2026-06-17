@@ -161,6 +161,9 @@ public:
 		Vector<Vector2> uv2;
 		Vector<Vector3> normal;
 		Vector<RID> material;
+		// <ELIM> per-vertex (parallel to material); bit 0 = Q3-style sky face.
+		Vector<int32_t> surface_flags;
+		// </ELIM>
 		Ref<Image> albedo_on_uv2;
 		Ref<Image> emission_on_uv2;
 		Variant userdata;

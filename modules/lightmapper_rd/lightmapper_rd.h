@@ -196,7 +196,10 @@ class LightmapperRD : public Lightmapper {
 		float min_bounds[3] = {};
 		uint32_t cull_mode = 0;
 		float max_bounds[3] = {};
-		float pad1 = 0.0;
+		// <ELIM> was pad1; bit 0 = Q3-style sky face.
+		// float pad1 = 0.0;
+		uint32_t surface_flags = 0;
+		// </ELIM>
 		bool operator<(const Triangle &p_triangle) const {
 			return slice < p_triangle.slice;
 		}

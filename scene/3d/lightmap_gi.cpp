@@ -30,7 +30,9 @@
 
 #include "lightmap_gi.h"
 
-#include "core/config/engine.h" // <ELIM> Runtime bake path.
+// <ELIM> Runtime bake path.
+#include "core/config/engine.h"
+// </ELIM>
 #include "core/config/project_settings.h"
 #include "core/io/config_file.h"
 #include "core/math/delaunay_3d.h"
@@ -1073,6 +1075,18 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 					mat_rid = mat->get_rid();
 				}
 
+				// <ELIM> Detect Q3-style sky faces from the EFFECTIVE material
+				// (TURNT assigns via surface override, so prefer it over the mesh
+				// material). The override material carries the bool meta "tnt_sky".
+				int32_t surface_flags = 0;
+				{
+					Ref<Material> eff_mat = (i < mf.overrides.size() && mf.overrides[i].is_valid()) ? mf.overrides[i] : mat;
+					if (eff_mat.is_valid() && bool(eff_mat->get_meta(SNAME("tnt_sky"), false))) {
+						surface_flags |= 1;
+					}
+				}
+				// </ELIM>
+
 				Vector<Vector3> vertices = a[Mesh::ARRAY_VERTEX];
 				const Vector3 *vr = vertices.ptr();
 				Vector<Vector2> uv = a[Mesh::ARRAY_TEX_UV2];
@@ -1122,6 +1136,9 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 						md.uv2.push_back(uvr[vidx[k]]);
 						md.normal.push_back(normal_xform.xform(nr[vidx[k]]).normalized());
 						md.material.push_back(mat_rid);
+						// <ELIM> sky-face flag (parallel to material).
+						md.surface_flags.push_back(surface_flags);
+						// </ELIM>
 					}
 				}
 			}
@@ -1273,7 +1290,10 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 	// Add everything to lightmapper
 	if (environment_mode != ENVIRONMENT_MODE_DISABLED) {
 		if (p_bake_step) {
-			p_bake_step(0.41, RTR("Preparing Environment"), p_bake_userdata, true); // <ELIM> Upstream typo: was 4.1 (409% in progress UIs).
+			// <ELIM> Upstream typo: was 4.1 (409% in progress UIs).
+			// p_bake_step(4.1, RTR("Preparing Environment"), p_bake_userdata, true);
+			p_bake_step(0.41, RTR("Preparing Environment"), p_bake_userdata, true);
+			// </ELIM>
 		}
 
 		environment_transform = get_global_transform().basis;

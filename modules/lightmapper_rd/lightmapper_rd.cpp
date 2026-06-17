@@ -503,7 +503,10 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 			if (material.is_valid()) {
 				t.cull_mode = RSG::material_storage->material_get_cull_mode(material);
 			}
-			t.pad1 = 0; //make valgrind not complain
+			// <ELIM> Carry the per-surface sky flag (parallel to material) to the GPU.
+			// t.pad1 = 0; //make valgrind not complain
+			t.surface_flags = (i < mi.data.surface_flags.size()) ? uint32_t(mi.data.surface_flags[i]) : 0;
+			// </ELIM>
 			triangles.push_back(t);
 			slice_triangle_count.write[t.slice]++;
 		}
