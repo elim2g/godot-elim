@@ -65,6 +65,12 @@ class LightmapperRD : public Lightmapper {
 		MeshData data;
 		int slice = 0;
 		Vector2i offset;
+		// <ELIM> Trace-only mesh: traced (its triangles + surface_flags go into the
+		// grid/GPU buffer so it emits if it's a sky face and occludes/seals the bake
+		// either way) but excluded from atlas sizing/packing/blit and owning zero
+		// atlas texels. Mirrors MeshData::trace_only.
+		bool trace_only = false;
+		// </ELIM>
 	};
 
 	struct Light {
@@ -190,13 +196,21 @@ class LightmapperRD : public Lightmapper {
 		}
 	};
 
+	// <ELIM> Per-surface bake flags packed into Triangle::surface_flags (was pad1).
+	// Must match the #defines in lm_common_inc.glsl. Bit 0 = Q3-style sky face;
+	// bit 1 = trace-only occluder (in the trace grid + renders, but owns no atlas
+	// chart, so the GLSL treats non-sky trace-only faces as opaque black instead
+	// of atlas-sampling them).
+	static constexpr uint32_t SURFACE_FLAG_SKY = 1u;
+	static constexpr uint32_t SURFACE_FLAG_TRACE_ONLY = 2u;
+	// </ELIM>
 	struct Triangle {
 		uint32_t indices[3] = {};
 		uint32_t slice = 0;
 		float min_bounds[3] = {};
 		uint32_t cull_mode = 0;
 		float max_bounds[3] = {};
-		// <ELIM> was pad1; bit 0 = Q3-style sky face.
+		// <ELIM> was pad1; bit 0 = Q3-style sky face, bit 1 = trace-only occluder.
 		// float pad1 = 0.0;
 		uint32_t surface_flags = 0;
 		// </ELIM>

@@ -239,6 +239,11 @@ private:
 		Ref<Mesh> mesh;
 		float lightmap_scale = 0.0;
 		Vector<Ref<Material>> overrides;
+		// <ELIM> Trace-only mesh (tnt_lightmap_trace_only): traced (so it emits if
+		// it's a sky face, and occludes/seals the bake either way) and rendered, but
+		// allocated no atlas — collected without the UV2/GI_STATIC requirements.
+		bool trace_only = false;
+		// </ELIM>
 	};
 
 	void _find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &meshes, Vector<LightsFound> &lights, Vector<Vector3> &probes);

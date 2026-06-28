@@ -56,13 +56,20 @@
 //#define DEBUG_TEXTURES
 
 void LightmapperRD::add_mesh(const MeshData &p_mesh) {
-	ERR_FAIL_COND(p_mesh.albedo_on_uv2.is_null() || p_mesh.albedo_on_uv2->is_empty());
-	ERR_FAIL_COND(p_mesh.emission_on_uv2.is_null() || p_mesh.emission_on_uv2->is_empty());
-	ERR_FAIL_COND(p_mesh.albedo_on_uv2->get_width() != p_mesh.emission_on_uv2->get_width());
-	ERR_FAIL_COND(p_mesh.albedo_on_uv2->get_height() != p_mesh.emission_on_uv2->get_height());
+	// <ELIM> Trace-only meshes carry no albedo/emission UV2 source (no atlas chart),
+	// so only the geometry (points) is required for them; the atlas-texture asserts
+	// apply solely to atlas-baked meshes.
+	if (!p_mesh.trace_only) {
+		ERR_FAIL_COND(p_mesh.albedo_on_uv2.is_null() || p_mesh.albedo_on_uv2->is_empty());
+		ERR_FAIL_COND(p_mesh.emission_on_uv2.is_null() || p_mesh.emission_on_uv2->is_empty());
+		ERR_FAIL_COND(p_mesh.albedo_on_uv2->get_width() != p_mesh.emission_on_uv2->get_width());
+		ERR_FAIL_COND(p_mesh.albedo_on_uv2->get_height() != p_mesh.emission_on_uv2->get_height());
+	}
 	ERR_FAIL_COND(p_mesh.points.is_empty());
 	MeshInstance mi;
 	mi.data = p_mesh;
+	mi.trace_only = p_mesh.trace_only;
+	// </ELIM>
 	mesh_instances.push_back(mi);
 }
 
@@ -253,10 +260,24 @@ Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_
 
 	for (int m_i = 0; m_i < mesh_instances.size(); m_i++) {
 		MeshInstance &mi = mesh_instances.write[m_i];
+		// <ELIM> Trace-only meshes own no atlas chart: push a zero-size placeholder to
+		// keep `sizes` parallel to mesh_instances (so best_atlas_offsets[m_i] stays
+		// aligned), but contribute nothing to atlas sizing/packing.
+		if (mi.trace_only) {
+			sizes.push_back(Size2i());
+			continue;
+		}
+		// </ELIM>
 		Size2i s = Size2i(mi.data.albedo_on_uv2->get_width(), mi.data.albedo_on_uv2->get_height());
 		sizes.push_back(s);
 		atlas_size = atlas_size.max(s + Size2i(2, 2).maxi(p_denoiser_range) * p_supersampling_factor);
 	}
+
+	// <ELIM> Guard the all-trace-only degenerate case: if no atlas-baked mesh
+	// contributed, atlas_size is still empty (and atlas_slices would resolve to 0),
+	// which proceeds into a degenerate empty atlas pack. Fail clearly instead.
+	ERR_FAIL_COND_V_MSG(atlas_size == Size2i(), BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES, "Lightmap bake has no atlas-baked meshes (every collected mesh is trace-only); nothing to bake.");
+	// </ELIM>
 
 	int max = nearest_power_of_2_templated(atlas_size.width);
 	max = MAX(max, nearest_power_of_2_templated(atlas_size.height));
@@ -282,17 +303,23 @@ Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_
 	while (atlas_size.x <= p_max_texture_size && atlas_size.y <= p_max_texture_size) {
 		Vector<Vector2i> source_sizes;
 		Vector<int> source_indices;
-		source_sizes.resize(sizes.size());
-		source_indices.resize(sizes.size());
-		for (int i = 0; i < source_indices.size(); i++) {
+		// <ELIM> Pack only atlas-baked meshes; trace-only meshes are excluded from the
+		// packer entirely (their source_index/offset is never produced). source_indices
+		// still references the original mesh_instances index so atlas_offsets (sized to
+		// all meshes) stays addressable for the real meshes.
+		for (int i = 0; i < sizes.size(); i++) {
+			if (mesh_instances[i].trace_only) {
+				continue;
+			}
 			// Add padding between lightmaps.
 			// Scale the padding if the lightmap will be downsampled at the end of the baking process
 			// Otherwise the padding would be insufficient.
-			source_sizes.write[i] = sizes[i] + Vector2i(2, 2).maxi(p_denoiser_range) * p_supersampling_factor;
-			source_indices.write[i] = i;
+			source_sizes.push_back(sizes[i] + Vector2i(2, 2).maxi(p_denoiser_range) * p_supersampling_factor);
+			source_indices.push_back(i);
 		}
 		Vector<Vector3i> atlas_offsets;
-		atlas_offsets.resize(source_sizes.size());
+		atlas_offsets.resize(sizes.size());
+		// </ELIM>
 
 		// Ensure the sizes can all fit into a single atlas layer.
 		// This should always happen, and this check is only in place to prevent an infinite loop.
@@ -367,6 +394,16 @@ Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_
 
 	for (int m_i = 0; m_i < mesh_instances.size(); m_i++) {
 		MeshInstance &mi = mesh_instances.write[m_i];
+		// <ELIM> Trace-only meshes own no atlas: no offset, no real slice, no blit.
+		// Use a sentinel slice one past the last valid slice so their triangles sort
+		// after all atlas-baked ones and are excluded from per-slice raster/seam/texel
+		// passes (which iterate [0, atlas_slices)); the grid plot still emits them.
+		if (mi.trace_only) {
+			mi.offset = Vector2i();
+			mi.slice = atlas_slices;
+			continue;
+		}
+		// </ELIM>
 		mi.offset.x = best_atlas_offsets[m_i].x;
 		mi.offset.y = best_atlas_offsets[m_i].y;
 		mi.slice = best_atlas_offsets[m_i].z;
@@ -405,15 +442,31 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 
 		MeshInstance &mi = mesh_instances.write[m_i];
 
-		Vector2 uv_scale = Vector2(mi.data.albedo_on_uv2->get_width(), mi.data.albedo_on_uv2->get_height()) / Vector2(atlas_size);
-		Vector2 uv_offset = Vector2(mi.offset) / Vector2(atlas_size);
+		// <ELIM> Trace-only meshes own no atlas chart, so the UV2->atlas mapping is
+		// invalid (no albedo_on_uv2). Their triangles are still built + plotted into
+		// the grid (so trace_ray can hit them), but they carry zero UV.
+		const bool mesh_trace_only = mi.trace_only;
+		Vector2 uv_scale;
+		Vector2 uv_offset;
+		if (!mesh_trace_only) {
+			uv_scale = Vector2(mi.data.albedo_on_uv2->get_width(), mi.data.albedo_on_uv2->get_height()) / Vector2(atlas_size);
+			uv_offset = Vector2(mi.offset) / Vector2(atlas_size);
+		}
+		// </ELIM>
 		if (m_i == 0) {
 			bounds.position = mi.data.points[0];
 		}
 
 		for (int i = 0; i < mi.data.points.size(); i += 3) {
 			Vector3 vtxs[3] = { mi.data.points[i + 0], mi.data.points[i + 1], mi.data.points[i + 2] };
-			Vector2 uvs[3] = { mi.data.uv2[i + 0] * uv_scale + uv_offset, mi.data.uv2[i + 1] * uv_scale + uv_offset, mi.data.uv2[i + 2] * uv_scale + uv_offset };
+			// <ELIM> Zero UV for trace-only triangles (no atlas mapping).
+			Vector2 uvs[3] = { Vector2(), Vector2(), Vector2() };
+			if (!mesh_trace_only) {
+				uvs[0] = mi.data.uv2[i + 0] * uv_scale + uv_offset;
+				uvs[1] = mi.data.uv2[i + 1] * uv_scale + uv_offset;
+				uvs[2] = mi.data.uv2[i + 2] * uv_scale + uv_offset;
+			}
+			// </ELIM>
 			Vector3 normal[3] = { mi.data.normal[i + 0], mi.data.normal[i + 1], mi.data.normal[i + 2] };
 
 			AABB taabb;
@@ -451,7 +504,9 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 			}
 
 			//compute seams that will need to be blended later
-			for (int k = 0; k < 3; k++) {
+			// <ELIM> Trace-only meshes own no atlas texels, so there are no seams to
+			// blend (and their sentinel slice is out of slice_seam_count's range).
+			for (int k = 0; !mesh_trace_only && k < 3; k++) {
 				int n = (k + 1) % 3;
 
 				Edge edge(vtxs[k], vtxs[n], normal[k], normal[n]);
@@ -503,12 +558,23 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 			if (material.is_valid()) {
 				t.cull_mode = RSG::material_storage->material_get_cull_mode(material);
 			}
-			// <ELIM> Carry the per-surface sky flag (parallel to material) to the GPU.
+			// <ELIM> Carry the per-surface sky flag (parallel to material) to the GPU,
+			// then OR in SURFACE_FLAG_TRACE_ONLY for trace-only meshes so the GLSL treats
+			// non-sky trace-only faces as opaque black occluders (never atlas-sampled).
 			// t.pad1 = 0; //make valgrind not complain
 			t.surface_flags = (i < mi.data.surface_flags.size()) ? uint32_t(mi.data.surface_flags[i]) : 0;
+			if (mesh_trace_only) {
+				t.surface_flags |= SURFACE_FLAG_TRACE_ONLY;
+			}
 			// </ELIM>
 			triangles.push_back(t);
-			slice_triangle_count.write[t.slice]++;
+			// <ELIM> Trace-only triangles own no atlas slice (sentinel == atlas_slices),
+			// so they must NOT be counted in slice_triangle_count (sized atlas_slices)
+			// — they are still plotted into the grid below and traced on the GPU.
+			if (!mesh_trace_only) {
+				slice_triangle_count.write[t.slice]++;
+			}
+			// </ELIM>
 		}
 	}
 
@@ -2411,6 +2477,13 @@ Variant LightmapperRD::get_bake_mesh_userdata(int p_index) const {
 
 Rect2 LightmapperRD::get_bake_mesh_uv_scale(int p_index) const {
 	ERR_FAIL_COND_V(lightmap_textures.is_empty(), Rect2());
+	// <ELIM> Trace-only meshes own no atlas chart (null albedo_on_uv2): they are never
+	// registered as lightmap users, so they have no UV scale.
+	ERR_FAIL_INDEX_V(p_index, mesh_instances.size(), Rect2());
+	if (mesh_instances[p_index].trace_only) {
+		return Rect2();
+	}
+	// </ELIM>
 	Rect2 uv_ofs;
 	Vector2 atlas_size = Vector2(lightmap_textures[0]->get_width(), lightmap_textures[0]->get_height());
 	uv_ofs.position = Vector2(mesh_instances[p_index].offset) / atlas_size;
@@ -2420,6 +2493,12 @@ Rect2 LightmapperRD::get_bake_mesh_uv_scale(int p_index) const {
 
 int LightmapperRD::get_bake_mesh_texture_slice(int p_index) const {
 	ERR_FAIL_INDEX_V(p_index, mesh_instances.size(), Variant());
+	// <ELIM> Trace-only meshes own no atlas slice (sentinel slice == atlas_slices);
+	// mirror get_bake_mesh_uv_scale and return -1 instead of the out-of-range slice.
+	if (mesh_instances[p_index].trace_only) {
+		return -1;
+	}
+	// </ELIM>
 	return mesh_instances[p_index].slice;
 }
 

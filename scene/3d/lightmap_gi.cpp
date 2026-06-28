@@ -392,7 +392,49 @@ LightmapGIData::~LightmapGIData() {
 
 void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &meshes, Vector<LightsFound> &lights, Vector<Vector3> &probes) {
 	MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(p_at_node);
-	if (mi && mi->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && mi->is_visible_in_tree()) {
+	// <ELIM> Trace-only meshes (tnt_lightmap_trace_only) are collected regardless of
+	// gi_mode and WITHOUT the UV2 requirement: they contribute triangles (with their
+	// surface flags) to the trace structures so they occlude/seal the bake and render,
+	// but are never atlas-baked. Covers both Q3 sky faces and opaque occluders. Guarded
+	// by !collected_trace_only below so a STATIC trace-only mesh is collected once. Meta
+	// name must match libturnt's set_meta side.
+	bool collected_trace_only = false;
+	// was: mi->get_meta(SNAME("tnt_lightmap_emit_only"), false)
+	if (mi && bool(mi->get_meta(SNAME("tnt_lightmap_trace_only"), false)) && mi->is_visible_in_tree()) {
+		Ref<Mesh> mesh = mi->get_mesh();
+		if (mesh.is_valid()) {
+			bool surfaces_found = false;
+			for (int i = 0; i < mesh->get_surface_count(); i++) {
+				if (mesh->surface_get_primitive_type(i) == Mesh::PRIMITIVE_TRIANGLES) {
+					surfaces_found = true;
+					break;
+				}
+			}
+			if (surfaces_found) {
+				MeshesFound mf;
+				mf.xform = get_global_transform().affine_inverse() * mi->get_global_transform();
+				mf.node_path = get_path_to(mi);
+				mf.subindex = -1;
+				mf.mesh = mesh;
+				mf.lightmap_scale = mi->get_lightmap_texel_scale();
+				mf.trace_only = true;
+
+				Ref<Material> all_override = mi->get_material_override();
+				for (int i = 0; i < mesh->get_surface_count(); i++) {
+					if (all_override.is_valid()) {
+						mf.overrides.push_back(all_override);
+					} else {
+						mf.overrides.push_back(mi->get_surface_override_material(i));
+					}
+				}
+
+				meshes.push_back(mf);
+				collected_trace_only = true;
+			}
+		}
+	}
+	if (mi && !collected_trace_only && mi->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && mi->is_visible_in_tree()) {
+		// </ELIM>
 		Ref<Mesh> mesh = mi->get_mesh();
 		if (mesh.is_valid()) {
 			bool all_have_uv2_and_normal = true;
@@ -990,33 +1032,9 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 
 			MeshesFound &mf = meshes_found.write[m_i];
 
-			Size2i mesh_lightmap_size = mf.mesh->get_lightmap_size_hint();
-			if (mesh_lightmap_size == Size2i(0, 0)) {
-				// TODO we should compute a size if no lightmap hint is set, as we did in 3.x.
-				// For now set to basic size to avoid crash.
-				mesh_lightmap_size = Size2i(64, 64);
-			}
-			// Double lightmap texel density if downsampling is enabled, as the final texture size will be halved before saving lightmaps.
-			Size2i lightmap_size = Size2i(Size2(mesh_lightmap_size) * mf.lightmap_scale * texel_scale) * (supersampling_enabled ? supersampling_factor : 1.0);
-			ERR_FAIL_COND_V(lightmap_size.x == 0 || lightmap_size.y == 0, BAKE_ERROR_LIGHTMAP_TOO_SMALL);
-
-			TypedArray<RID> overrides;
-			overrides.resize(mf.overrides.size());
-			for (int i = 0; i < mf.overrides.size(); i++) {
-				if (mf.overrides[i].is_valid()) {
-					overrides[i] = mf.overrides[i]->get_rid();
-				}
-			}
-			TypedArray<Image> images = RS::get_singleton()->bake_render_uv2(mf.mesh->get_rid(), overrides, lightmap_size);
-
-			ERR_FAIL_COND_V(images.is_empty(), BAKE_ERROR_CANT_CREATE_IMAGE);
-
-			Ref<Image> albedo = images[RS::BAKE_CHANNEL_ALBEDO_ALPHA];
-			Ref<Image> orm = images[RS::BAKE_CHANNEL_ORM];
-
-			//multiply albedo by metal
-
 			Lightmapper::MeshData md;
+			// <ELIM> Trace-only mesh: traced (occludes/emits) but never atlas-baked.
+			md.trace_only = mf.trace_only;
 
 			{
 				Dictionary d;
@@ -1024,41 +1042,77 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 				if (mf.subindex >= 0) {
 					d["subindex"] = mf.subindex;
 				}
+				// Mark the userdata so finalize can skip user (atlas) assignment.
+				if (mf.trace_only) {
+					d["trace_only"] = true;
+				}
 				md.userdata = d;
 			}
 
-			{
-				if (albedo->get_format() != Image::FORMAT_RGBA8) {
-					albedo->convert(Image::FORMAT_RGBA8);
+			// For trace_only meshes, skip the per-mesh UV2 render entirely (no atlas
+			// chart is allocated): no albedo/emission UV2 source images, no atlas size
+			// hint. Their triangles are still gathered + emitted below.
+			if (!mf.trace_only) {
+				Size2i mesh_lightmap_size = mf.mesh->get_lightmap_size_hint();
+				if (mesh_lightmap_size == Size2i(0, 0)) {
+					// TODO we should compute a size if no lightmap hint is set, as we did in 3.x.
+					// For now set to basic size to avoid crash.
+					mesh_lightmap_size = Size2i(64, 64);
 				}
-				if (orm->get_format() != Image::FORMAT_RGBA8) {
-					orm->convert(Image::FORMAT_RGBA8);
+				// Double lightmap texel density if downsampling is enabled, as the final texture size will be halved before saving lightmaps.
+				Size2i lightmap_size = Size2i(Size2(mesh_lightmap_size) * mf.lightmap_scale * texel_scale) * (supersampling_enabled ? supersampling_factor : 1.0);
+				ERR_FAIL_COND_V(lightmap_size.x == 0 || lightmap_size.y == 0, BAKE_ERROR_LIGHTMAP_TOO_SMALL);
+
+				TypedArray<RID> overrides;
+				overrides.resize(mf.overrides.size());
+				for (int i = 0; i < mf.overrides.size(); i++) {
+					if (mf.overrides[i].is_valid()) {
+						overrides[i] = mf.overrides[i]->get_rid();
+					}
 				}
-				Vector<uint8_t> albedo_alpha = albedo->get_data();
-				Vector<uint8_t> orm_data = orm->get_data();
+				TypedArray<Image> images = RS::get_singleton()->bake_render_uv2(mf.mesh->get_rid(), overrides, lightmap_size);
 
-				Vector<uint8_t> albedom;
-				uint32_t len = albedo_alpha.size();
-				albedom.resize(len);
-				const uint8_t *r_aa = albedo_alpha.ptr();
-				const uint8_t *r_orm = orm_data.ptr();
-				uint8_t *w_albedo = albedom.ptrw();
+				ERR_FAIL_COND_V(images.is_empty(), BAKE_ERROR_CANT_CREATE_IMAGE);
 
-				for (uint32_t i = 0; i < len; i += 4) {
-					w_albedo[i + 0] = uint8_t(CLAMP(float(r_aa[i + 0]) * (1.0 - float(r_orm[i + 2] / 255.0)), 0, 255));
-					w_albedo[i + 1] = uint8_t(CLAMP(float(r_aa[i + 1]) * (1.0 - float(r_orm[i + 2] / 255.0)), 0, 255));
-					w_albedo[i + 2] = uint8_t(CLAMP(float(r_aa[i + 2]) * (1.0 - float(r_orm[i + 2] / 255.0)), 0, 255));
-					w_albedo[i + 3] = r_aa[i + 3];
+				Ref<Image> albedo = images[RS::BAKE_CHANNEL_ALBEDO_ALPHA];
+				Ref<Image> orm = images[RS::BAKE_CHANNEL_ORM];
+
+				//multiply albedo by metal
+
+				{
+					if (albedo->get_format() != Image::FORMAT_RGBA8) {
+						albedo->convert(Image::FORMAT_RGBA8);
+					}
+					if (orm->get_format() != Image::FORMAT_RGBA8) {
+						orm->convert(Image::FORMAT_RGBA8);
+					}
+					Vector<uint8_t> albedo_alpha = albedo->get_data();
+					Vector<uint8_t> orm_data = orm->get_data();
+
+					Vector<uint8_t> albedom;
+					uint32_t len = albedo_alpha.size();
+					albedom.resize(len);
+					const uint8_t *r_aa = albedo_alpha.ptr();
+					const uint8_t *r_orm = orm_data.ptr();
+					uint8_t *w_albedo = albedom.ptrw();
+
+					for (uint32_t i = 0; i < len; i += 4) {
+						w_albedo[i + 0] = uint8_t(CLAMP(float(r_aa[i + 0]) * (1.0 - float(r_orm[i + 2] / 255.0)), 0, 255));
+						w_albedo[i + 1] = uint8_t(CLAMP(float(r_aa[i + 1]) * (1.0 - float(r_orm[i + 2] / 255.0)), 0, 255));
+						w_albedo[i + 2] = uint8_t(CLAMP(float(r_aa[i + 2]) * (1.0 - float(r_orm[i + 2] / 255.0)), 0, 255));
+						w_albedo[i + 3] = r_aa[i + 3];
+					}
+
+					md.albedo_on_uv2.instantiate();
+					md.albedo_on_uv2->set_data(lightmap_size.width, lightmap_size.height, false, Image::FORMAT_RGBA8, albedom);
 				}
 
-				md.albedo_on_uv2.instantiate();
-				md.albedo_on_uv2->set_data(lightmap_size.width, lightmap_size.height, false, Image::FORMAT_RGBA8, albedom);
+				md.emission_on_uv2 = images[RS::BAKE_CHANNEL_EMISSION];
+				if (md.emission_on_uv2->get_format() != Image::FORMAT_RGBAH) {
+					md.emission_on_uv2->convert(Image::FORMAT_RGBAH);
+				}
 			}
-
-			md.emission_on_uv2 = images[RS::BAKE_CHANNEL_EMISSION];
-			if (md.emission_on_uv2->get_format() != Image::FORMAT_RGBAH) {
-				md.emission_on_uv2->convert(Image::FORMAT_RGBAH);
-			}
+			// </ELIM>
 
 			//get geometry
 
@@ -1095,10 +1149,27 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 				const Vector3 *nr = nullptr;
 				Vector<int> index = a[Mesh::ARRAY_INDEX];
 
-				ERR_CONTINUE(uv.is_empty());
+				// <ELIM> Trace-only meshes carry no UV2 (they own no atlas). Tolerate
+				// its absence and push dummy uv2 below so array lengths stay aligned;
+				// the values are never used (no atlas mapping for trace_only).
+				if (!mf.trace_only) {
+					ERR_CONTINUE(uv.is_empty());
+				}
+				// </ELIM>
+				// <ELIM> Collection relaxes only the UV2 requirement for trace-only
+				// meshes; a trace-only surface that also lacks normals still passes
+				// collection but is dropped here, so it silently fails to seal the
+				// bake (contrary to intent). Warn so the drop is visible (normals are
+				// virtually always present, so this is diagnostic, not a behavior change).
+				if (mf.trace_only && normals.is_empty()) {
+					WARN_PRINT(vformat("LightmapGI: trace-only surface %d of '%s' has no normals; skipping (it will not occlude/seal the bake).", i, String(mf.node_path)));
+				}
+				// </ELIM>
 				ERR_CONTINUE(normals.is_empty());
 
-				uvr = uv.ptr();
+				if (!uv.is_empty()) {
+					uvr = uv.ptr();
+				}
 				nr = normals.ptr();
 
 				int facecount;
@@ -1133,7 +1204,10 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 						}
 						md.points.push_back(v);
 
-						md.uv2.push_back(uvr[vidx[k]]);
+						// <ELIM> Dummy uv2 for trace-only meshes (no UV2 / no atlas);
+						// keeps uv2 length aligned with points (value unused).
+						md.uv2.push_back(uvr ? uvr[vidx[k]] : Vector2());
+						// </ELIM>
 						md.normal.push_back(normal_xform.xform(nr[vidx[k]]).normalized());
 						md.material.push_back(mat_rid);
 						// <ELIM> sky-face flag (parallel to material).
@@ -1430,6 +1504,12 @@ LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Li
 
 	for (int i = 0; i < lightmapper->get_bake_mesh_count(); i++) {
 		Dictionary d = lightmapper->get_bake_mesh_userdata(i);
+		// <ELIM> Trace-only meshes own no atlas chart, so they must not become
+		// lightmap "users" (no instance_geometry_set_lightmap mapping). Skip them.
+		if (bool(d.get("trace_only", false))) {
+			continue;
+		}
+		// </ELIM>
 		NodePath np = d["path"];
 		int32_t subindex = -1;
 		if (d.has("subindex")) {

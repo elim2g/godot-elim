@@ -39,7 +39,13 @@ vertices;
 #define CULL_BACK 2
 
 // <ELIM> Per-surface bake flags packed into Triangle.surface_flags (was pad1).
+// Bit 0 = Q3-style sky face (emits / lets the sun through). Bit 1 = trace-only
+// occluder: it is in the trace grid + renders, but owns no atlas chart, so it
+// must never be atlas-sampled. A non-sky trace-only face resolves to opaque
+// black (alpha=1 seals the bake, albedo=0 = zero bounce). A face may carry both
+// bits (a sky face that is also trace-only); the sky checks run first.
 #define SURFACE_FLAG_SKY 1u
+#define SURFACE_FLAG_TRACE_ONLY 2u
 // </ELIM>
 
 struct Triangle {

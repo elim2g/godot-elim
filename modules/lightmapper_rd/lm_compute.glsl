@@ -345,6 +345,21 @@ uint trace_ray_closest_hit_triangle_albedo_alpha(vec3 p_from, vec3 p_to, bool p_
 		Vertex vert1 = vertices.data[triangles.data[tidx].indices.y];
 		Vertex vert2 = vertices.data[triangles.data[tidx].indices.z];
 
+		// <ELIM> Trace-only faces (sky or not) own no atlas chart: their sentinel
+		// slice == atlas_slices is OOB for the albedo atlas, so resolve them here
+		// without a textureLod — opaque black (a=1 seals the bake; albedo 0 tints
+		// no light, and a=1 fully occludes so the tint is zeroed regardless). Sun
+		// shadows already skip sky via p_skip_sky; omni/spot treat sky as opaque.
+		{
+			uint trace_only_flags = triangles.data[tidx].surface_flags;
+			if ((trace_only_flags & SURFACE_FLAG_TRACE_ONLY) != 0u) {
+				albedo_alpha = vec4(0.0, 0.0, 0.0, 1.0);
+				hit_position = barycentric.x * vert0.position + barycentric.y * vert1.position + barycentric.z * vert2.position;
+				return ret;
+			}
+		}
+		// </ELIM>
+
 		vec3 uvw = vec3(barycentric.x * vert0.uv + barycentric.y * vert1.uv + barycentric.z * vert2.uv, float(triangles.data[tidx].slice));
 
 		albedo_alpha = textureLod(sampler2DArray(albedo_tex, linear_sampler), uvw, 0);
@@ -748,11 +763,23 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 		vec3 barycentric;
 		uint trace_result = trace_ray_closest_hit_triangle(position + ray_dir * bake_params.bias, position + ray_dir * length(bake_params.world_size), tidx, barycentric);
 		if (trace_result == RAY_FRONT) {
+			// <ELIM> Cache the per-surface flags once (read twice below: sky +
+			// trace-only), mirroring trace_ray_closest_hit_triangle_albedo_alpha.
+			uint surface_flags = triangles.data[tidx].surface_flags;
+			// </ELIM>
 			// <ELIM> A bounce/probe ray that reaches a Q3-style sky face sees the
 			// environment (skylight) and stops, exactly like escaping to infinity.
 			// Sealed maps thus get sky ambient through sky apertures without CLEAR.
-			if ((triangles.data[tidx].surface_flags & SURFACE_FLAG_SKY) != 0u) {
+			if ((surface_flags & SURFACE_FLAG_SKY) != 0u) {
 				light += throughput * trace_environment_color(ray_dir);
+				break;
+			}
+			// </ELIM>
+			// <ELIM> Non-sky trace-only faces are opaque black occluders with no
+			// atlas chart. A bounce/probe ray that reaches one stops and adds nothing
+			// (albedo 0 = zero bounce), which also avoids the garbage atlas reads
+			// below. The sky check above runs first, so sky faces never reach here.
+			if ((surface_flags & SURFACE_FLAG_TRACE_ONLY) != 0u) {
 				break;
 			}
 			// </ELIM>

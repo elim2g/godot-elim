@@ -161,8 +161,15 @@ public:
 		Vector<Vector2> uv2;
 		Vector<Vector3> normal;
 		Vector<RID> material;
-		// <ELIM> per-vertex (parallel to material); bit 0 = Q3-style sky face.
+		// <ELIM> per-vertex (parallel to material); bit 0 = Q3-style sky face,
+		// bit 1 = trace-only occluder.
 		Vector<int32_t> surface_flags;
+		// </ELIM>
+		// <ELIM> Trace-only geometry: contributes triangles (with surface_flags) to
+		// the trace grid so it emits (Q3 sky) and/or occludes/seals the bake, but
+		// owns NO atlas chart — no albedo/emission UV2 source, no atlas slice, no
+		// texels baked. Its uv2 is padded with dummies to keep array lengths aligned.
+		bool trace_only = false;
 		// </ELIM>
 		Ref<Image> albedo_on_uv2;
 		Ref<Image> emission_on_uv2;
