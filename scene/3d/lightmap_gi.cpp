@@ -991,8 +991,17 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 static constexpr float SURFACE_LIGHT_PATCH_AREA = 4.0f; // m²; ~2 m patch edge.
 static constexpr float SURFACE_LIGHT_MIN_PATCH_AREA = 1e-4f; // Degenerate-sliver cull.
 static constexpr int SURFACE_LIGHT_MAX_SUBDIV_DEPTH = 16; // Bisection halves area per step.
-static constexpr uint32_t SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE = 256; // Past this, faces emit as single coarse patches.
-static constexpr uint32_t SURFACE_LIGHT_MAX_PATCHES_TOTAL = 4096; // Past this, further emitter faces are skipped.
+// These are NOT a quality/performance budget — this is an offline bake, and the
+// real per-texel cost bound is SURFACE_LIGHT_CUTOFF (below), which keeps each
+// patch's derived range genuinely local regardless of how many patches exist
+// in total. They exist purely as a backstop against a pathological/misconfigured
+// map (e.g. a texture accidentally flagged as a surface light across the whole
+// level) hanging the bake or exhausting VRAM, not to trade away legitimate
+// light contribution. Past SURFACE_LIGHT_MAX_PATCHES_TOTAL, further emitter
+// faces are skipped entirely (a real, logged loss of light) — if you hit either
+// ceiling on a legitimate map, raise it rather than accept the drop.
+static constexpr uint32_t SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE = 16384;
+static constexpr uint32_t SURFACE_LIGHT_MAX_PATCHES_TOTAL = 131072;
 // Lambertian radiance→irradiance normalization; the single calibration knob
 // keeping emitter energies tuned against the old bounce-hit estimator in the
 // same visual ballpark.
@@ -1010,6 +1019,22 @@ static constexpr float SURFACE_LIGHT_ENERGY_SCALE = 1.0f / (float)Math::PI;
 // contributing locally, not one patch reaching across the whole map — that is
 // also the physically appropriate way tiled area lights work.
 static constexpr float SURFACE_LIGHT_CUTOFF = 0.04f;
+// Connectivity + coplanarity merge. The importer's vertex-weld / T-junction pass
+// re-triangulates one logical flat emissive brush face into dozens–hundreds of
+// sub-PATCH_AREA slivers (needed to seal see-through seam cracks against neighbouring
+// geometry — see surface_gatherer.cpp; must NOT be bypassed). Emitting those fragments
+// as individual patches is doubly wrong: patch count tracks the raw fragment count
+// (blowing the caps, after which whole emitter faces are silently dropped), and each
+// fragment's tiny area gates its derived range (range ∝ peak·area) to near-zero so most
+// emitter energy contributes nothing. Fix: flood-fill each surface's emitter triangles
+// into connected components gated by exact coplanarity — every sliver of one original
+// planar brush face is mutually edge-adjacent and coplanar, so they collapse into ONE
+// component regardless of fragmentation, recovering the true minimal-vertex face. Two
+// genuinely different faces/fixtures are either not edge-adjacent or (if they touch)
+// disagree in normal, so they stay distinct. Patch count then tracks real face area.
+static constexpr float SURFACE_LIGHT_WELD_EPS = 1e-3f; // Vert quantization for edge matching; finer than welded-coincident spacing.
+static constexpr float SURFACE_LIGHT_COPLANAR_DOT = 0.9995f; // Tight near-parallel gate; brush faces are exactly planar, not "roughly flat".
+static constexpr float SURFACE_LIGHT_TILE_CELL = 2.0f; // sqrt(PATCH_AREA); cell size for retiling an oversized (large) component.
 
 struct SurfaceLightPatch {
 	Vector3 pos;
@@ -1018,6 +1043,90 @@ struct SurfaceLightPatch {
 	Color color;
 	float energy = 0.0f;
 };
+
+// Quantized world vertex + undirected edge key for triangle-adjacency matching.
+// Snapping to SURFACE_LIGHT_WELD_EPS makes coincident (already-welded) verts hash
+// identically despite post-xform float error, so shared edges are found.
+struct SurfaceLightVertKey {
+	int32_t x;
+	int32_t y;
+	int32_t z;
+	bool operator==(const SurfaceLightVertKey &p_o) const { return x == p_o.x && y == p_o.y && z == p_o.z; }
+	bool operator<(const SurfaceLightVertKey &p_o) const {
+		if (x != p_o.x) {
+			return x < p_o.x;
+		}
+		if (y != p_o.y) {
+			return y < p_o.y;
+		}
+		return z < p_o.z;
+	}
+};
+
+struct SurfaceLightEdgeKey {
+	SurfaceLightVertKey a; // Canonical order (a <= b) so edge (u,v) == (v,u).
+	SurfaceLightVertKey b;
+	bool operator==(const SurfaceLightEdgeKey &p_o) const { return a == p_o.a && b == p_o.b; }
+};
+
+struct SurfaceLightEdgeKeyHasher {
+	static uint32_t hash(const SurfaceLightEdgeKey &p_k) {
+		uint32_t h = hash_murmur3_one_32((uint32_t)p_k.a.x);
+		h = hash_murmur3_one_32((uint32_t)p_k.a.y, h);
+		h = hash_murmur3_one_32((uint32_t)p_k.a.z, h);
+		h = hash_murmur3_one_32((uint32_t)p_k.b.x, h);
+		h = hash_murmur3_one_32((uint32_t)p_k.b.y, h);
+		h = hash_murmur3_one_32((uint32_t)p_k.b.z, h);
+		return hash_fmix32(h);
+	}
+};
+
+// One emitter triangle (world space) plus a connected coplanar component (a logical
+// face) accumulated over its member triangles, and a cell accumulator for retiling an
+// oversized component. Area-weighted centroid/normal + summed area are all an area
+// patch needs; tris keeps the member list for the oversized-face grid pass.
+struct SurfaceLightTri {
+	Vector3 v[3];
+	Vector3 normal; // Vertex normal: authoritatively out of the emitting face.
+	Vector3 centroid;
+	float area = 0.0f;
+};
+
+struct SurfaceLightComponent {
+	Vector3 pos_sum; // Area-weighted centroid accumulator.
+	Vector3 normal_sum; // Area-weighted normal accumulator.
+	float area = 0.0f;
+	LocalVector<int32_t> tris;
+};
+
+struct SurfaceLightCellAccum {
+	Vector3 pos_sum; // Area-weighted centroid accumulator.
+	float area = 0.0f;
+};
+
+static SurfaceLightEdgeKey _surface_light_edge_key(const Vector3 &p_a, const Vector3 &p_b) {
+	const float inv = 1.0f / SURFACE_LIGHT_WELD_EPS;
+	const SurfaceLightVertKey ka{ (int32_t)Math::round(p_a.x * inv), (int32_t)Math::round(p_a.y * inv), (int32_t)Math::round(p_a.z * inv) };
+	const SurfaceLightVertKey kb{ (int32_t)Math::round(p_b.x * inv), (int32_t)Math::round(p_b.y * inv), (int32_t)Math::round(p_b.z * inv) };
+	SurfaceLightEdgeKey e;
+	if (kb < ka) {
+		e.a = kb;
+		e.b = ka;
+	} else {
+		e.a = ka;
+		e.b = kb;
+	}
+	return e;
+}
+
+// Union-find with path halving over the per-surface triangle parent array.
+static int32_t _surface_light_uf_find(int32_t *p_parent, int32_t p_i) {
+	while (p_parent[p_i] != p_i) {
+		p_parent[p_i] = p_parent[p_parent[p_i]];
+		p_i = p_parent[p_i];
+	}
+	return p_i;
+}
 
 // Longest-edge bisection: bounded aspect ratios on brush-face fans, halves the
 // area each step. Leaves are pushed as patches; a leaf still above the target
@@ -1243,6 +1352,10 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 				}
 				const uint32_t surface_patch_base = (uint32_t)surface_light_patches.size();
 				bool surface_light_cap_hit = false;
+				// Per-surface emitter triangles, merged into logical faces (connected
+				// coplanar components) after this surface's triangle loop; scoped to i so
+				// distinct faces / fixtures never cross-merge.
+				LocalVector<SurfaceLightTri> surface_light_tris;
 				// </ELIM>
 
 				Vector<Vector3> vertices = a[Mesh::ARRAY_VERTEX];
@@ -1319,24 +1432,157 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 						// </ELIM>
 					}
 
-					// <ELIM> Surface light: subdivide the face into area patches in
-					// the same space the punctual light positions use (mf.xform).
+					// <ELIM> Surface light: collect this triangle in world space (mf.xform,
+					// matching the punctual-light positions). Patch generation is deferred to
+					// the connectivity + coplanarity merge after the loop (see SURFACE_LIGHT_*).
 					if (is_surface_light) {
+						SurfaceLightTri tri;
+						tri.v[0] = mf.xform.xform(vr[vidx[0]]);
+						tri.v[1] = mf.xform.xform(vr[vidx[1]]);
+						tri.v[2] = mf.xform.xform(vr[vidx[2]]);
+						tri.normal = normal_xform.xform(nr[vidx[0]]).normalized();
+						tri.area = 0.5f * (tri.v[1] - tri.v[0]).cross(tri.v[2] - tri.v[0]).length();
+						tri.centroid = (tri.v[0] + tri.v[1] + tri.v[2]) * (1.0f / 3.0f);
+						// Drop degenerate slivers up front so they can't seed spurious edges.
+						if (tri.area >= SURFACE_LIGHT_MIN_PATCH_AREA) {
+							surface_light_tris.push_back(tri);
+						}
+					}
+					// </ELIM>
+				}
+
+				// <ELIM> Merge this surface's emitter triangles into logical faces via
+				// connectivity + exact coplanarity, then emit patches per face. Union-find
+				// over shared (welded) edges, unioning two edge-adjacent triangles only
+				// when their face normals are near-parallel — so every sliver a tjunc fan
+				// produced from one exactly-planar brush face collapses into ONE component
+				// (patch count then tracks real face area, not fragment count), while two
+				// distinct faces/fixtures stay separate (not edge-adjacent, or, if they do
+				// touch, their normals disagree).
+				if (is_surface_light && !surface_light_tris.is_empty()) {
+					const int32_t tri_count = (int32_t)surface_light_tris.size();
+
+					LocalVector<int32_t> parent;
+					parent.resize(tri_count);
+					for (int32_t t = 0; t < tri_count; t++) {
+						parent[t] = t;
+					}
+					HashMap<SurfaceLightEdgeKey, int32_t, SurfaceLightEdgeKeyHasher> edge_owner;
+					for (int32_t t = 0; t < tri_count; t++) {
+						const SurfaceLightTri &tri = surface_light_tris[t];
+						for (int e = 0; e < 3; e++) {
+							const SurfaceLightEdgeKey ek = _surface_light_edge_key(tri.v[e], tri.v[(e + 1) % 3]);
+							HashMap<SurfaceLightEdgeKey, int32_t, SurfaceLightEdgeKeyHasher>::Iterator it = edge_owner.find(ek);
+							if (it == edge_owner.end()) {
+								edge_owner.insert(ek, t);
+							} else if (surface_light_tris[it->value].normal.dot(tri.normal) > SURFACE_LIGHT_COPLANAR_DOT) {
+								const int32_t ra = _surface_light_uf_find(parent.ptr(), t);
+								const int32_t rb = _surface_light_uf_find(parent.ptr(), it->value);
+								if (ra != rb) {
+									parent[ra] = rb;
+								}
+							}
+						}
+					}
+
+					// Gather triangles per component root: summed area, area-weighted
+					// centroid and normal (all an area patch needs), plus the member list
+					// for the oversized-face retiling path below.
+					HashMap<int32_t, int32_t> root_to_comp;
+					LocalVector<SurfaceLightComponent> comps;
+					for (int32_t t = 0; t < tri_count; t++) {
+						const int32_t root = _surface_light_uf_find(parent.ptr(), t);
+						int32_t ci;
+						HashMap<int32_t, int32_t>::Iterator it = root_to_comp.find(root);
+						if (it == root_to_comp.end()) {
+							ci = (int32_t)comps.size();
+							comps.push_back(SurfaceLightComponent());
+							root_to_comp.insert(root, ci);
+						} else {
+							ci = it->value;
+						}
+						SurfaceLightComponent &c = comps[ci];
+						const SurfaceLightTri &tri = surface_light_tris[t];
+						c.area += tri.area;
+						c.pos_sum += tri.centroid * tri.area;
+						c.normal_sum += tri.normal * tri.area;
+						c.tris.push_back(t);
+					}
+
+					const float pos_bias = MAX(0.01f, bias);
+					for (uint32_t ci = 0; ci < comps.size(); ci++) {
+						const SurfaceLightComponent &c = comps[ci];
+						if (c.area < SURFACE_LIGHT_MIN_PATCH_AREA) {
+							continue;
+						}
 						if ((uint32_t)surface_light_patches.size() >= SURFACE_LIGHT_MAX_PATCHES_TOTAL) {
 							if (!surface_light_global_cap_warned) {
 								WARN_PRINT(vformat("LightmapGI: global surface-light patch cap (%d) reached at '%s'; further emitter faces will not emit as area lights.", (int)SURFACE_LIGHT_MAX_PATCHES_TOTAL, String(mf.node_path)));
 								surface_light_global_cap_warned = true;
 							}
+							break;
+						}
+						if ((uint32_t)surface_light_patches.size() - surface_patch_base >= SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE) {
+							surface_light_cap_hit = true;
+							break;
+						}
+						const Vector3 cnormal = c.normal_sum.normalized();
+						if (c.area <= SURFACE_LIGHT_PATCH_AREA) {
+							// Common case (a light fixture, however fragmented): one patch.
+							SurfaceLightPatch patch;
+							patch.normal = cnormal;
+							patch.pos = c.pos_sum / c.area + cnormal * pos_bias;
+							patch.area = c.area;
+							patch.color = surface_light_color;
+							patch.energy = surface_light_energy;
+							surface_light_patches.push_back(patch);
 						} else {
-							const Vector3 sv0 = mf.xform.xform(vr[vidx[0]]);
-							const Vector3 sv1 = mf.xform.xform(vr[vidx[1]]);
-							const Vector3 sv2 = mf.xform.xform(vr[vidx[2]]);
-							const Vector3 sn = normal_xform.xform(nr[vidx[0]]).normalized();
-							_subdivide_surface_light_tri(sv0, sv1, sv2, sn, 0, surface_light_color, surface_light_energy, MAX(0.01f, bias), surface_patch_base, surface_light_patches, surface_light_cap_hit);
+							// Genuinely large emitting face: tile into ~PATCH_AREA patches for
+							// correct local falloff (one map-spanning patch is physically wrong;
+							// see SURFACE_LIGHT_CUTOFF). A grid split is safe here because the
+							// component is already connected + coplanar, so a cell boundary can't
+							// leak into unrelated geometry. Sub-PATCH_AREA members fuse per cell;
+							// a member already >= PATCH_AREA is bisected by the splitter.
+							HashMap<Vector3i, SurfaceLightCellAccum> cells;
+							const float inv_cell = 1.0f / SURFACE_LIGHT_TILE_CELL;
+							for (uint32_t m = 0; m < c.tris.size(); m++) {
+								const SurfaceLightTri &tri = surface_light_tris[c.tris[m]];
+								if (tri.area >= SURFACE_LIGHT_PATCH_AREA) {
+									_subdivide_surface_light_tri(tri.v[0], tri.v[1], tri.v[2], cnormal, 0, surface_light_color, surface_light_energy, pos_bias, surface_patch_base, surface_light_patches, surface_light_cap_hit);
+								} else {
+									const Vector3i cell((int32_t)Math::floor(tri.centroid.x * inv_cell), (int32_t)Math::floor(tri.centroid.y * inv_cell), (int32_t)Math::floor(tri.centroid.z * inv_cell));
+									SurfaceLightCellAccum &acc = cells[cell];
+									acc.pos_sum += tri.centroid * tri.area;
+									acc.area += tri.area;
+								}
+							}
+							for (const KeyValue<Vector3i, SurfaceLightCellAccum> &E : cells) {
+								if (E.value.area < SURFACE_LIGHT_MIN_PATCH_AREA) {
+									continue;
+								}
+								if ((uint32_t)surface_light_patches.size() >= SURFACE_LIGHT_MAX_PATCHES_TOTAL) {
+									if (!surface_light_global_cap_warned) {
+										WARN_PRINT(vformat("LightmapGI: global surface-light patch cap (%d) reached at '%s'; further emitter faces will not emit as area lights.", (int)SURFACE_LIGHT_MAX_PATCHES_TOTAL, String(mf.node_path)));
+										surface_light_global_cap_warned = true;
+									}
+									break;
+								}
+								if ((uint32_t)surface_light_patches.size() - surface_patch_base >= SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE) {
+									surface_light_cap_hit = true;
+									break;
+								}
+								SurfaceLightPatch patch;
+								patch.normal = cnormal;
+								patch.pos = E.value.pos_sum / E.value.area + cnormal * pos_bias;
+								patch.area = E.value.area;
+								patch.color = surface_light_color;
+								patch.energy = surface_light_energy;
+								surface_light_patches.push_back(patch);
+							}
 						}
 					}
-					// </ELIM>
 				}
+				// </ELIM>
 
 				// <ELIM>
 				if (surface_light_cap_hit) {
