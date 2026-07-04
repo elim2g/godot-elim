@@ -502,6 +502,29 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 		dist = length(bake_params.world_size);
 		attenuation = 1.0;
 		soft_shadowing_disk_size = light_data.size;
+	// <ELIM> q3map2-style surface lights: one-sided Lambertian area patch with
+	// form-factor falloff regularized by the patch area (the attenuation slot
+	// is repurposed to carry AREA), so texels beside/near the emitter stay
+	// finite — no saturated blob. size = patch radius, so the existing
+	// Vogel-disk soft shadowing area-samples the patch footprint (correct
+	// penumbrae for free).
+	} else if (light_data.type == LIGHT_TYPE_AREA_PATCH) {
+		light_pos = light_data.position;
+		r_light_dir = normalize(light_pos - p_position);
+		dist = distance(p_position, light_pos);
+		if (dist > light_data.range) {
+			// Energy-derived cutoff; early-out before any shadow rays.
+			return;
+		}
+		float cos_e = dot(light_data.direction, -r_light_dir);
+		if (cos_e < 0.0001) {
+			// Emitter is one-sided; also culls coplanar self-lighting.
+			return;
+		}
+		float patch_area = light_data.attenuation;
+		attenuation = patch_area * cos_e / (dist * dist + patch_area);
+		soft_shadowing_disk_size = light_data.size / dist;
+	// </ELIM>
 	} else {
 		light_pos = light_data.position;
 		r_light_dir = normalize(light_pos - p_position);
@@ -820,7 +843,17 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 			vec3 emissive = textureLod(sampler2DArray(emission_tex, linear_sampler), uvw, 0).rgb;
 			emissive *= bake_params.exposure_normalization;
 
-			light += throughput * emissive * albedo_alpha.a;
+			// <ELIM> Surface-light faces are integrated analytically as AREA_PATCH
+			// lights in trace_direct_light (at texels AND at bounce vertices), so
+			// adding their rasterized emission here would double-count. Albedo /
+			// throughput below still apply, so light bounced OFF the emitter keeps
+			// its tint, and direct_light above is still re-evaluated (that is where
+			// the emitter's indirect now comes from).
+			// light += throughput * emissive * albedo_alpha.a;
+			if ((surface_flags & SURFACE_FLAG_SURFACE_LIGHT) == 0u) {
+				light += throughput * emissive * albedo_alpha.a;
+			}
+			// </ELIM>
 			throughput = mix(throughput, throughput * albedo_alpha.rgb, albedo_alpha.a);
 			light += throughput * direct_light * bake_params.bounce_indirect_energy * albedo_alpha.a;
 

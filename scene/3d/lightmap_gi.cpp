@@ -984,6 +984,87 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	return _bake_finalize_internal(state, p_bake_step, p_bake_userdata);
 }
 
+// <ELIM> q3map2-style surface lights: surfaces whose effective material carries
+// the bool meta "tnt_surface_light" are subdivided into area sample patches and
+// added as LIGHT_TYPE_AREA_PATCH lights, so emissive faces are integrated
+// analytically in the direct pass (no Monte Carlo blotch).
+static constexpr float SURFACE_LIGHT_PATCH_AREA = 4.0f; // m²; ~2 m patch edge.
+static constexpr float SURFACE_LIGHT_MIN_PATCH_AREA = 1e-4f; // Degenerate-sliver cull.
+static constexpr int SURFACE_LIGHT_MAX_SUBDIV_DEPTH = 16; // Bisection halves area per step.
+static constexpr uint32_t SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE = 256; // Past this, faces emit as single coarse patches.
+static constexpr uint32_t SURFACE_LIGHT_MAX_PATCHES_TOTAL = 4096; // Past this, further emitter faces are skipped.
+// Lambertian radiance→irradiance normalization; the single calibration knob
+// keeping emitter energies tuned against the old bounce-hit estimator in the
+// same visual ballpark.
+static constexpr float SURFACE_LIGHT_ENERGY_SCALE = 1.0f / (float)Math::PI;
+// Range-cull contribution threshold. Must keep the derived range GENUINELY
+// LOCAL (a handful of world units), not just small relative to energy: for a
+// large emissive surface, adjacent patches sit much closer to each other than
+// any energy-derived range, so a lenient cutoff gives near-zero effective
+// culling between them — every texel near the surface then evaluates most/all
+// of its patches, each with a full soft-shadow ray trace. On a real map with a
+// wide lit surface spanning many chunks this blew the per-texel light count
+// into the thousands, made a single bake dispatch run long enough to trip the
+// GPU driver's TDR watchdog, and reset the device mid-bake (DEVICE_REMOVED).
+// Coverage over a large surface should come from MANY nearby patches
+// contributing locally, not one patch reaching across the whole map — that is
+// also the physically appropriate way tiled area lights work.
+static constexpr float SURFACE_LIGHT_CUTOFF = 0.04f;
+
+struct SurfaceLightPatch {
+	Vector3 pos;
+	Vector3 normal;
+	float area = 0.0f;
+	Color color;
+	float energy = 0.0f;
+};
+
+// Longest-edge bisection: bounded aspect ratios on brush-face fans, halves the
+// area each step. Leaves are pushed as patches; a leaf still above the target
+// area (depth or per-surface cap hit) is emitted anyway so energy is conserved,
+// it just samples coarser (r_cap_hit reports it). p_face_normal is the surface's
+// vertex normal: it authoritatively points out of the emitting face, whereas the
+// cross product's sign depends on winding (Godot fronts wind clockwise), so the
+// cross is used for area only.
+static void _subdivide_surface_light_tri(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Vector3 &p_face_normal, int p_depth, const Color &p_color, float p_energy, float p_pos_bias, uint32_t p_surface_patch_base, Vector<SurfaceLightPatch> &r_patches, bool &r_cap_hit) {
+	const Vector3 cr = (p_b - p_a).cross(p_c - p_a);
+	const float area = 0.5f * cr.length();
+	if (area < SURFACE_LIGHT_MIN_PATCH_AREA) {
+		return;
+	}
+	const bool surface_capped = (uint32_t)r_patches.size() - p_surface_patch_base >= SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE;
+	if (area <= SURFACE_LIGHT_PATCH_AREA || p_depth >= SURFACE_LIGHT_MAX_SUBDIV_DEPTH || surface_capped) {
+		if (area > SURFACE_LIGHT_PATCH_AREA) {
+			r_cap_hit = true;
+		}
+		SurfaceLightPatch patch;
+		patch.normal = p_face_normal;
+		patch.pos = (p_a + p_b + p_c) / 3.0f + patch.normal * p_pos_bias;
+		patch.area = area;
+		patch.color = p_color;
+		patch.energy = p_energy;
+		r_patches.push_back(patch);
+		return;
+	}
+	const float ab = (p_b - p_a).length_squared();
+	const float bc = (p_c - p_b).length_squared();
+	const float ca = (p_a - p_c).length_squared();
+	if (ab >= bc && ab >= ca) {
+		const Vector3 m = (p_a + p_b) * 0.5f;
+		_subdivide_surface_light_tri(p_a, m, p_c, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_surface_patch_base, r_patches, r_cap_hit);
+		_subdivide_surface_light_tri(m, p_b, p_c, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_surface_patch_base, r_patches, r_cap_hit);
+	} else if (bc >= ab && bc >= ca) {
+		const Vector3 m = (p_b + p_c) * 0.5f;
+		_subdivide_surface_light_tri(p_a, p_b, m, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_surface_patch_base, r_patches, r_cap_hit);
+		_subdivide_surface_light_tri(p_a, m, p_c, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_surface_patch_base, r_patches, r_cap_hit);
+	} else {
+		const Vector3 m = (p_c + p_a) * 0.5f;
+		_subdivide_surface_light_tri(p_a, p_b, m, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_surface_patch_base, r_patches, r_cap_hit);
+		_subdivide_surface_light_tri(m, p_b, p_c, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_surface_patch_base, r_patches, r_cap_hit);
+	}
+}
+// </ELIM>
+
 // PHASE 1 (MAIN THREAD): mesh/light discovery, the per-mesh RS::bake_render_uv2
 // render, probe generation, and the environment panorama — everything that
 // depends on the global RenderingServer or the scene tree. Populates the
@@ -1013,6 +1094,11 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 	Vector<Lightmapper::MeshData> mesh_data;
 	Vector<LightsFound> lights_found;
 	Vector<Vector3> probes_found;
+	// <ELIM> Area patches collected from "tnt_surface_light" surfaces during the
+	// mesh loop; flushed to the lightmapper alongside the punctual lights.
+	Vector<SurfaceLightPatch> surface_light_patches;
+	bool surface_light_global_cap_warned = false;
+	// </ELIM>
 	AABB bounds;
 	{
 		Vector<MeshesFound> meshes_found;
@@ -1129,16 +1215,34 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 					mat_rid = mat->get_rid();
 				}
 
-				// <ELIM> Detect Q3-style sky faces from the EFFECTIVE material
-				// (TURNT assigns via surface override, so prefer it over the mesh
-				// material). The override material carries the bool meta "tnt_sky".
+				// <ELIM> Detect Q3-style sky faces and surface lights from the
+				// EFFECTIVE material (TURNT assigns via surface override, so prefer
+				// it over the mesh material). The override material carries the bool
+				// metas "tnt_sky" / "tnt_surface_light". A surface light's emission
+				// is integrated analytically as area patches (added as lights after
+				// the mesh loop), so its triangles are flagged for the bounce pass
+				// to skip their rasterized emission (no double count).
 				int32_t surface_flags = 0;
+				bool is_surface_light = false;
+				Color surface_light_color;
+				float surface_light_energy = 0.0f;
 				{
 					Ref<Material> eff_mat = (i < mf.overrides.size() && mf.overrides[i].is_valid()) ? mf.overrides[i] : mat;
 					if (eff_mat.is_valid() && bool(eff_mat->get_meta(SNAME("tnt_sky"), false))) {
 						surface_flags |= 1;
 					}
+					if (eff_mat.is_valid() && bool(eff_mat->get_meta(SNAME("tnt_surface_light"), false))) {
+						Ref<BaseMaterial3D> bm = eff_mat;
+						if (bm.is_valid() && bm->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
+							surface_flags |= 4; // LightmapperRD::SURFACE_FLAG_SURFACE_LIGHT
+							is_surface_light = true;
+							surface_light_color = bm->get_emission().srgb_to_linear();
+							surface_light_energy = bm->get_emission_energy_multiplier();
+						}
+					}
 				}
+				const uint32_t surface_patch_base = (uint32_t)surface_light_patches.size();
+				bool surface_light_cap_hit = false;
 				// </ELIM>
 
 				Vector<Vector3> vertices = a[Mesh::ARRAY_VERTEX];
@@ -1214,7 +1318,31 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 						md.surface_flags.push_back(surface_flags);
 						// </ELIM>
 					}
+
+					// <ELIM> Surface light: subdivide the face into area patches in
+					// the same space the punctual light positions use (mf.xform).
+					if (is_surface_light) {
+						if ((uint32_t)surface_light_patches.size() >= SURFACE_LIGHT_MAX_PATCHES_TOTAL) {
+							if (!surface_light_global_cap_warned) {
+								WARN_PRINT(vformat("LightmapGI: global surface-light patch cap (%d) reached at '%s'; further emitter faces will not emit as area lights.", (int)SURFACE_LIGHT_MAX_PATCHES_TOTAL, String(mf.node_path)));
+								surface_light_global_cap_warned = true;
+							}
+						} else {
+							const Vector3 sv0 = mf.xform.xform(vr[vidx[0]]);
+							const Vector3 sv1 = mf.xform.xform(vr[vidx[1]]);
+							const Vector3 sv2 = mf.xform.xform(vr[vidx[2]]);
+							const Vector3 sn = normal_xform.xform(nr[vidx[0]]).normalized();
+							_subdivide_surface_light_tri(sv0, sv1, sv2, sn, 0, surface_light_color, surface_light_energy, MAX(0.01f, bias), surface_patch_base, surface_light_patches, surface_light_cap_hit);
+						}
+					}
+					// </ELIM>
 				}
+
+				// <ELIM>
+				if (surface_light_cap_hit) {
+					WARN_PRINT(vformat("LightmapGI: surface light '%s' surface %d hit the %d-patch cap; sampling coarsened.", String(mf.node_path), i, (int)SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE));
+				}
+				// </ELIM>
 			}
 
 			mesh_data.push_back(md);
@@ -1356,6 +1484,24 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 		for (int i = 0; i < probes_found.size(); i++) {
 			lightmapper->add_probe(probes_found[i]);
 		}
+
+		// <ELIM> Surface-light patches: each becomes an AREA_PATCH light. The
+		// range solves the peak unshadowed contribution E·A/(d²+A) = CUTOFF for
+		// d, so out-of-range patches early-out before any shadow rays.
+		for (int i = 0; i < surface_light_patches.size(); i++) {
+			const SurfaceLightPatch &sp = surface_light_patches[i];
+			const float e_eff = sp.energy * SURFACE_LIGHT_ENERGY_SCALE;
+			const float peak = e_eff * MAX(sp.color.r, MAX(sp.color.g, sp.color.b));
+			// Hard ceiling keeps range bounded even at max emitter energy (the
+			// 256-energy slider max) or an oversized coarsened patch — see the
+			// SURFACE_LIGHT_CUTOFF comment for why an unbounded range is unsafe.
+			const float range = CLAMP(Math::sqrt(MAX(0.0f, peak * sp.area / SURFACE_LIGHT_CUTOFF - sp.area)), 1.0f, 40.0f);
+			lightmapper->add_area_patch_light(vformat("surface_light_patch_%d", i), true, sp.pos, sp.normal, sp.color, e_eff, 1.0f, sp.area, range);
+		}
+		if (!surface_light_patches.is_empty()) {
+			print_verbose(vformat("LightmapGI: added %d surface-light area patches.", (int)surface_light_patches.size()));
+		}
+		// </ELIM>
 	}
 
 	Ref<Image> environment_image;

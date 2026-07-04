@@ -148,6 +148,40 @@ void LightmapperRD::add_spot_light(const String &p_name, bool p_static, const Ve
 	light_metadata.push_back(md);
 }
 
+// <ELIM> q3map2-style surface-light sample patch. Reuses the punctual Light
+// struct: `attenuation` carries the patch AREA (form-factor numerator +
+// near-field regularizer), `size` the patch radius (drives the Vogel-disk
+// soft shadowing so shadow rays area-sample the patch footprint), and
+// `shadow_blur` must be 1.0 — it scales both the AA jitter and the disk;
+// 0 would silently disable the area sampling.
+void LightmapperRD::add_area_patch_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range) {
+	Light l;
+	l.type = LIGHT_TYPE_AREA_PATCH;
+	l.position[0] = p_position.x;
+	l.position[1] = p_position.y;
+	l.position[2] = p_position.z;
+	l.direction[0] = p_normal.x;
+	l.direction[1] = p_normal.y;
+	l.direction[2] = p_normal.z;
+	l.range = p_range;
+	l.attenuation = p_area;
+	l.color[0] = p_color.r;
+	l.color[1] = p_color.g;
+	l.color[2] = p_color.b;
+	l.energy = p_energy;
+	l.indirect_energy = p_indirect_energy;
+	l.static_bake = p_static;
+	l.size = Math::sqrt(p_area / (float)Math::PI);
+	l.shadow_blur = 1.0f;
+	lights.push_back(l);
+
+	LightMetadata md;
+	md.name = p_name;
+	md.type = LIGHT_TYPE_AREA_PATCH;
+	light_metadata.push_back(md);
+}
+// </ELIM>
+
 void LightmapperRD::add_probe(const Vector3 &p_position) {
 	Probe probe;
 	probe.position[0] = p_position.x;

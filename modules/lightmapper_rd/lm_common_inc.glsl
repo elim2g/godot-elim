@@ -46,6 +46,10 @@ vertices;
 // bits (a sky face that is also trace-only); the sky checks run first.
 #define SURFACE_FLAG_SKY 1u
 #define SURFACE_FLAG_TRACE_ONLY 2u
+// Bit 2 = surface light: emission is integrated analytically as
+// LIGHT_TYPE_AREA_PATCH lights, so the bounce pass must not also add the
+// rasterized emission (double count).
+#define SURFACE_FLAG_SURFACE_LIGHT 4u
 // </ELIM>
 
 struct Triangle {
@@ -80,6 +84,11 @@ triangle_indices;
 #define LIGHT_TYPE_DIRECTIONAL 0
 #define LIGHT_TYPE_OMNI 1
 #define LIGHT_TYPE_SPOT 2
+// <ELIM> Surface-light sample patch; must match Lightmapper::LIGHT_TYPE_AREA_PATCH.
+// For this type: direction = patch normal, attenuation = patch AREA (repurposed),
+// size = patch radius.
+#define LIGHT_TYPE_AREA_PATCH 3
+// </ELIM>
 
 struct Light {
 	vec3 position;
