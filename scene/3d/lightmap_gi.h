@@ -391,6 +391,14 @@ public:
 	void bake_abort();
 	// </ELIM>
 
+	// <ELIM> Decoupled debug hook: runs the shared surface-light patch collector on the
+	// LIVE tree (no bake) and returns the emitted patches in WORLD space for visualization.
+	// Each entry: { verts: PackedVector3Array(3 footprint verts), normal: Vector3,
+	// area: float (m^2), component: int (merged-island index) }. GDScript must have applied
+	// the emitter materials (tnt_surface_light) first — identical detection to the bake.
+	TypedArray<Dictionary> debug_get_surface_light_patches(Node *p_from_node = nullptr);
+	// </ELIM>
+
 	virtual PackedStringArray get_configuration_warnings() const override;
 
 	LightmapGI();

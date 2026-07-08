@@ -280,9 +280,23 @@ class LightmapperRD : public Lightmapper {
 		uint32_t ray_count = 0;
 		uint32_t ray_from = 0;
 		uint32_t ray_to = 0;
+		// <ELIM> Direct-pass light batching (TDR guard): the primary light pass
+		// splits its per-texel light loop into [light_from, light_to) batches so
+		// one dispatch's O(texels*lights*rays) cost stays under the GPU watchdog.
+		// Field order/offsets must match the push_constant block in lm_compute.glsl.
+		uint32_t light_from = 0;
+		uint32_t light_to = 0;
+		// </ELIM>
 		uint32_t region_ofs[2] = {};
 		uint32_t probe_count = 0;
 		uint32_t denoiser_range = 0;
+		// <ELIM> Pad to a 16-byte multiple. Adding light_from/light_to (TDR guard)
+		// grew this struct 32->40; Vulkan/RD rounds the shader's push-constant range
+		// up to a 16-byte multiple (48), so the supplied sizeof() must match or
+		// compute_list_set_push_constant rejects it ("requires 48, supplied 40").
+		// Mirrors RasterSeamsPushConstant's trailing pad[2].
+		uint32_t pad[2] = {};
+		// </ELIM>
 	};
 
 	Vector<Ref<Image>> lightmap_textures;

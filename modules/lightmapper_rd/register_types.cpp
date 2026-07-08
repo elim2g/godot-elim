@@ -52,6 +52,32 @@ void initialize_lightmapper_rd_module(ModuleInitializationLevel p_level) {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_quality/ultra_quality_ray_count", PROPERTY_HINT_RANGE, "1,4096,1,or_greater"), 2048);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/max_rays_per_pass", PROPERTY_HINT_RANGE, "1,256,1,or_greater"), 4);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/region_size", PROPERTY_HINT_RANGE, "1,4096,1,or_greater"), 512);
+	// <ELIM> TDR guard for the direct-light pass. The direct pass loops every light
+	// for every texel, so a single compute dispatch costs
+	// O(region_texels * lights * shadow_rays); emissive surface-light maps push the
+	// light count into the thousands and one dispatch runs long enough to trip the
+	// GPU driver watchdog (DEVICE_REMOVED). LightmapperRD::bake() batches the light
+	// loop so each dispatch's estimated worst-case trace count
+	// (region_texels * lights_in_batch * soft_shadow_rays_per_texel) stays under
+	// max_traces_per_dispatch. Sizing by traces (not a fixed light count) auto-shrinks
+	// the batch at high quality — where each light fires ~16x more soft-shadow rays —
+	// and keeps it large at low quality / quickbake. Keep the target well under the
+	// ~2s watchdog: assuming a pessimistic ~1e9 incoherent traces/s, the default
+	// 5e8 is ~0.5s worst case and ~4x below the empirically-safe point (a 256-light
+	// LOW-quality dispatch that bakes fine is ~2.1e9 worst-case traces). Lower it if
+	// a heavy map still trips the watchdog; raise it if bakes over-split and run slow.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/max_traces_per_dispatch", PROPERTY_HINT_RANGE, "1000000,10000000000,1,or_greater"), 500000000);
+	// Upper clamp on the cost-aware batch size above (and the light count below which
+	// a bake still runs in a single, bit-identical batch). See LightmapperRD::bake().
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/max_lights_per_pass", PROPERTY_HINT_RANGE, "1,65536,1,or_greater"), 256);
+	// Adaptive surface-light patch budget: emissive maps coarsen their patch tiling to
+	// target ~this many area patches total (never finer than the fixed PATCH_AREA tile),
+	// keeping the O(texels x lights) direct pass off the GPU-TDR cliff on big/over-applied
+	// emissive geometry. Lower to bake heavier maps faster (coarser emitter light); raise
+	// for finer emitter falloff on maps that bake comfortably. Read in
+	// LightmapGI::_collect_surface_light_patches() (defaults to SURFACE_LIGHT_TARGET_PATCHES).
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/surface_light_target_patches", PROPERTY_HINT_RANGE, "64,16384,1,or_greater"), 3000);
+	// </ELIM>
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/max_transparency_rays", PROPERTY_HINT_RANGE, "1,256,1,or_greater"), 8);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_quality/low_quality_probe_ray_count", PROPERTY_HINT_RANGE, "1,4096,1,or_greater"), 64);

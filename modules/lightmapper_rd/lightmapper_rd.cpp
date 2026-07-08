@@ -1874,6 +1874,43 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 		RID light_uniform_set = rd->uniform_set_create(uniforms, compute_shader_primary, 1);
 
+		// <ELIM> TDR guard: the direct pass evaluates every light for every texel
+		// (lm_compute.glsl MODE_DIRECT_LIGHT), so a single dispatch costs
+		// O(region_texels * lights * shadow_rays). Emissive surface-light maps push
+		// the light count into the thousands, making one region dispatch run long
+		// enough to trip the GPU driver's watchdog (DEVICE_REMOVED). A fixed
+		// light-batch size is too coarse: at FULL/ULTRA quality each light fires
+		// ~ray_count soft-shadow rays per texel (16x more than LOW/quickbake), so a
+		// batch safe at LOW still blows the ~2s watchdog at FULL. Instead, size each
+		// batch by ESTIMATED WORST-CASE TRACES: region_texels * lights * rays_per_texel
+		// must stay under max_traces_per_dispatch. rays_per_texel mirrors the shader's
+		// soft-shadow sampling exactly: AA_SAMPLES * shadowing_ray_count, with
+		// AA_SAMPLES = 16 and shadowing_ray_count = max(1, ray_count / AA_SAMPLES).
+		// Each batch is its own dispatch + submit()/sync(), so no single dispatch can
+		// trip the watchdog regardless of quality. When the whole light set fits in
+		// one batch (typical non-emissive maps, and quickbake's low ray count) the
+		// shader takes its first_light_batch imageStore path — bit-identical to
+		// upstream. lights_per_pass is computed per region below (from the region's
+		// actual texel count); the values here drive the once-per-bake diagnostic.
+		const int total_light_count = (int)lights.size();
+		const int max_lights_per_pass = MAX(1, (int)GLOBAL_GET("rendering/lightmapping/bake_performance/max_lights_per_pass"));
+		const int64_t max_traces_per_dispatch = MAX((int64_t)1, (int64_t)GLOBAL_GET("rendering/lightmapping/bake_performance/max_traces_per_dispatch"));
+		// Soft-shadow BVH traces per light per texel; must match lm_compute.glsl
+		// (const int AA_SAMPLES = 16; shadowing_ray_count = max(1, ray_count / 16)).
+		const int64_t aa_samples = 16;
+		const int64_t rays_per_texel = aa_samples * MAX((int64_t)1, (int64_t)push_constant.ray_count / aa_samples);
+		{
+			// Diagnostic for the full (bottleneck) region; edge regions get a larger
+			// batch computed in the loop. Always printed so a bake hang/crash can be
+			// traced to the chosen granularity.
+			const int64_t rep_texels = (int64_t)max_region_size * (int64_t)max_region_size;
+			const int rep_lights_per_pass = MIN((int)CLAMP(max_traces_per_dispatch / MAX((int64_t)1, rep_texels * rays_per_texel), (int64_t)1, (int64_t)max_lights_per_pass), MAX(1, total_light_count));
+			const int rep_iterations = Math::division_round_up(MAX(1, total_light_count), MAX(1, rep_lights_per_pass));
+			print_line(vformat("LightmapGI/RD: direct-light batching: %d light(s), ray_count=%d (~%d soft-shadow traces/texel/light), region=%d^2 -> %d light(s)/dispatch, %d batch(es)/region.",
+					total_light_count, (int)push_constant.ray_count, (int)rays_per_texel, max_region_size, rep_lights_per_pass, rep_iterations));
+		}
+		// </ELIM>
+
 		int count = 0;
 		for (int s = 0; s < atlas_slices; s++) {
 			push_constant.atlas_slice = s;
@@ -1889,16 +1926,42 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 					push_constant.region_ofs[1] = y;
 
 					group_size = Vector3i(Math::division_round_up(w, 8), Math::division_round_up(h, 8), 1);
-					RD::ComputeListID compute_list = rd->compute_list_begin();
-					rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_primary_pipeline);
-					rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
-					rd->compute_list_bind_uniform_set(compute_list, light_uniform_set, 1);
-					rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
-					rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
-					rd->compute_list_end();
+					// <ELIM> Cost-aware light-batch loop (TDR guard). Batch size comes
+					// from this region's ACTUAL texel count, so no dispatch exceeds
+					// max_traces_per_dispatch worst-case traces. Each batch is its own
+					// dispatch + submit()/sync(), so batch k's accumulator writes are
+					// visible to batch k+1's read-modify-write, and no dispatch is long
+					// enough to trip the GPU watchdog. Batch 0 initializes the outputs;
+					// later batches add (see lm_compute.glsl first_light_batch). A single
+					// batch (light set fits the budget) == the original single dispatch.
+					// RD::ComputeListID compute_list = rd->compute_list_begin();
+					// rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_primary_pipeline);
+					// rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
+					// rd->compute_list_bind_uniform_set(compute_list, light_uniform_set, 1);
+					// rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
+					// rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
+					// rd->compute_list_end();
+					// rd->submit();
+					// rd->sync();
+					const int64_t region_texels = (int64_t)w * (int64_t)h;
+					const int lights_per_pass = MIN((int)CLAMP(max_traces_per_dispatch / MAX((int64_t)1, region_texels * rays_per_texel), (int64_t)1, (int64_t)max_lights_per_pass), MAX(1, total_light_count));
+					const int light_iterations = Math::division_round_up(MAX(1, total_light_count), MAX(1, lights_per_pass));
+					for (int lb = 0; lb < light_iterations; lb++) {
+						push_constant.light_from = (uint32_t)(lb * lights_per_pass);
+						push_constant.light_to = (uint32_t)MIN((lb + 1) * lights_per_pass, total_light_count);
 
-					rd->submit();
-					rd->sync();
+						RD::ComputeListID compute_list = rd->compute_list_begin();
+						rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_primary_pipeline);
+						rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
+						rd->compute_list_bind_uniform_set(compute_list, light_uniform_set, 1);
+						rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
+						rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
+						rd->compute_list_end();
+
+						rd->submit();
+						rd->sync();
+					}
+					// </ELIM>
 
 					count++;
 					if (p_step_function) {

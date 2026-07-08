@@ -52,7 +52,11 @@ layout(rgba32f, set = 1, binding = 1) uniform restrict image2DArray unocclude;
 
 #if defined(MODE_DIRECT_LIGHT) || defined(MODE_BOUNCE_LIGHT)
 
-layout(rgba16f, set = 1, binding = 0) uniform restrict writeonly image2DArray dest_light;
+// <ELIM> Dropped `writeonly`: the direct pass now reads-modifies-writes this
+// image to accumulate across light batches (TDR guard, see MODE_DIRECT_LIGHT).
+// layout(rgba16f, set = 1, binding = 0) uniform restrict writeonly image2DArray dest_light;
+layout(rgba16f, set = 1, binding = 0) uniform restrict image2DArray dest_light;
+// </ELIM>
 layout(set = 1, binding = 1) uniform texture2DArray source_light;
 layout(set = 1, binding = 2) uniform texture2DArray source_position;
 layout(set = 1, binding = 3) uniform texture2DArray source_normal;
@@ -61,7 +65,11 @@ layout(rgba16f, set = 1, binding = 4) uniform restrict image2DArray accum_light;
 #endif
 
 #if defined(MODE_DIRECT_LIGHT) && defined(USE_SHADOWMASK)
-layout(rgba8, set = 1, binding = 5) uniform restrict writeonly image2DArray shadowmask;
+// <ELIM> Dropped `writeonly`: read-modify-write (max) to accumulate the
+// directional shadowmask across light batches (TDR guard).
+// layout(rgba8, set = 1, binding = 5) uniform restrict writeonly image2DArray shadowmask;
+layout(rgba8, set = 1, binding = 5) uniform restrict image2DArray shadowmask;
+// </ELIM>
 #elif defined(MODE_BOUNCE_LIGHT)
 layout(set = 1, binding = 5) uniform texture2D environment;
 #endif
@@ -92,6 +100,16 @@ layout(push_constant, std430) uniform Params {
 	uint ray_count;
 	uint ray_from;
 	uint ray_to;
+
+	// <ELIM> Direct-pass light-batch range (TDR guard); must match the C++
+	// PushConstant in lightmapper_rd.h. MODE_DIRECT_LIGHT iterates the per-texel
+	// light loop over [light_from, light_to) instead of all lights at once, so a
+	// single dispatch's O(texels*lights*rays) cost cannot exceed the GPU driver
+	// watchdog window. One batch (light_from==0, light_to==light_count) is
+	// bit-identical to the original single pass.
+	uint light_from;
+	uint light_to;
+	// </ELIM>
 
 	ivec2 region_ofs;
 	uint probe_count;
@@ -139,7 +157,9 @@ bool ray_box_test(vec3 p_from, vec3 p_inv_dir, vec3 p_box_min, vec3 p_box_max) {
 #define CLUSTER_TRIANGLE_ITERATION
 #endif
 
-// <ELIM> Added p_skip_sky: lets directional sun shadow rays pass through Q3 sky faces.
+// <ELIM> Added p_skip_sky: lets a directional-sun shadow ray treat a Q3 sky face as
+// reached-light (the sun seen through the aperture) rather than an occluder. The name
+// is historical (it used to skip/pass-through sky); see the closest-hit sky logic below.
 // uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out vec3 r_normal, out uint r_triangle, out vec3 r_barycentric) {
 uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out float r_distance, out vec3 r_normal, out uint r_triangle, out vec3 r_barycentric) {
 // </ELIM>
@@ -170,6 +190,11 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out floa
 		if (triangle_count > 0) {
 			uint hit = RAY_MISS;
 			float best_distance = 1e20;
+			// <ELIM> Whether the current closest hit is a Q3 sky face. Lets a
+			// directional-sun shadow query (p_skip_sky) treat "closest thing toward
+			// the sun is a sky aperture" as reached-light instead of an occluder.
+			bool best_is_sky = false;
+			// </ELIM>
 			uint cluster_start = cluster_indices.data[cell_data.y * 2];
 			uint cell_triangle_start = cluster_indices.data[cell_data.y * 2 + 1];
 			uint cluster_count = (triangle_count + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
@@ -219,10 +244,19 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out floa
 							uint triangle_index = triangle_indices.data[cluster_triangle_index];
 							Triangle triangle = triangles.data[triangle_index];
 
-							// <ELIM> Q3-style sky faces are "windows": directional sun
-							// shadow rays pass straight through them, so a sealed map
-							// gets sun inward without CLEAR-removing the faces.
-							if (p_skip_sky && (triangle.surface_flags & SURFACE_FLAG_SKY) != 0u) {
+							// <ELIM> Q3-style sky faces are the sun's "window". For a
+							// directional-sun shadow query (p_skip_sky; name is historical),
+							// a sky face is NOT an occluder but REACHED-LIGHT: if the closest
+							// thing along the ray to the sun is a sky face, the texel sees the
+							// sun through the aperture and is LIT (a nearer SOLID face still
+							// shadows). So do NOT skip it here — let it compete in the
+							// closest-hit search, tag it (best_is_sky), and convert
+							// "closest hit == sky" into a miss after the cell (this
+							// p_any_hit == false path is closest-first). Only any-hit queries
+							// (never combined with p_skip_sky today) still skip sky, so they
+							// don't count it as an occluder.
+							bool tri_is_sky = p_skip_sky && (triangle.surface_flags & SURFACE_FLAG_SKY) != 0u;
+							if (tri_is_sky && p_any_hit) {
 								continue;
 							}
 							// </ELIM>
@@ -275,6 +309,12 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out floa
 
 									hit = backface ? RAY_BACK : RAY_FRONT;
 									best_distance = distance;
+									// <ELIM> Is this closest-so-far hit a sky aperture?
+									// (registers regardless of the sky face's facing —
+									// ray_hits_triangle / the cull_mode switch never discard
+									// the hit, so sky orientation does not matter.)
+									best_is_sky = tri_is_sky;
+									// </ELIM>
 									r_distance = distance;
 									r_normal = normal;
 									r_triangle = triangle_index;
@@ -293,6 +333,14 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out floa
 			}
 
 			if (hit != RAY_MISS) {
+				// <ELIM> Directional sun through a sky aperture: if the closest hit
+				// toward the sun is a sky face, the texel sees the sun -> reached-light
+				// (RAY_MISS = not occluded). best_is_sky is only ever set true under
+				// p_skip_sky, so omni/spot/bounce/any-hit queries are unaffected.
+				if (best_is_sky) {
+					return RAY_MISS;
+				}
+				// </ELIM>
 				return hit;
 			}
 		}
@@ -491,8 +539,9 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 	float attenuation;
 	float soft_shadowing_disk_size;
 	Light light_data = lights.data[p_light_index];
-	// <ELIM> The directional sun treats sky faces as transparent so it reaches
-	// interiors through Q3-style sky apertures (no effect when no face is sky).
+	// <ELIM> The directional sun treats a sky face as reached-light (sees the sun
+	// through the aperture) so it lights sealed interiors through Q3-style sky
+	// apertures with hard shadows from solid geometry (no effect when no face is sky).
 	bool skip_sky = (light_data.type == LIGHT_TYPE_DIRECTIONAL);
 	// </ELIM>
 	if (light_data.type == LIGHT_TYPE_DIRECTIONAL) {
@@ -942,6 +991,14 @@ void main() {
 	}
 	float texel_size_world_space = distance(position, neighbor_position.xyz) * bake_params.supersampling_factor;
 
+	// <ELIM> Light-batch accumulation (TDR guard): the first batch initializes the
+	// output images with imageStore (bit-identical to the original single pass);
+	// later batches read-modify-write to add their partial sum. Batches are
+	// serialized by submit()+sync() on the CPU side, so each batch sees the
+	// previous batch's stores.
+	bool first_light_batch = (params.light_from == 0u);
+	// </ELIM>
+
 	vec3 light_for_texture = vec3(0.0);
 	vec3 light_for_bounces = vec3(0.0);
 
@@ -959,7 +1016,12 @@ void main() {
 
 	// Use atlas position and a prime number as the seed.
 	uint noise = random_seed(ivec3(atlas_pos, 43573547));
-	for (uint i = 0; i < bake_params.light_count; i++) {
+	// <ELIM> Iterate this batch's light range [light_from, light_to) instead of
+	// all lights (TDR guard). One batch spanning [0, light_count) is identical to
+	// the original `for (i = 0; i < bake_params.light_count; i++)`.
+	// for (uint i = 0; i < bake_params.light_count; i++) {
+	for (uint i = params.light_from; i < params.light_to; i++) {
+	// </ELIM>
 		vec3 light;
 		vec3 light_dir;
 		float shadow;
@@ -1013,21 +1075,60 @@ void main() {
 	}
 
 	light_for_bounces *= bake_params.exposure_normalization;
-	imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_bounces, 1.0));
+	// <ELIM> Batch-accumulate into dest_light (the bounce source). The first light
+	// batch stores; later batches add their partial sum. A single batch is the
+	// original single imageStore, bit-identical.
+	// imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_bounces, 1.0));
+	if (first_light_batch) {
+		imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_bounces, 1.0));
+	} else {
+		vec3 prev_bounces = imageLoad(dest_light, ivec3(atlas_pos, params.atlas_slice)).rgb;
+		imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), vec4(prev_bounces + light_for_bounces, 1.0));
+	}
+	// </ELIM>
 
 #ifdef USE_SH_LIGHTMAPS
+	// <ELIM> Batch-accumulate the SH coefficients. sh_accum[k].a is always 1.0
+	// (only .rgb accumulates), so the stored alpha matches the original. A single
+	// batch reproduces the original four imageStores exactly.
 	// Keep for adding at the end.
-	imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 0), sh_accum[0]);
-	imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 1), sh_accum[1]);
-	imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 2), sh_accum[2]);
-	imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 3), sh_accum[3]);
+	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 0), sh_accum[0]);
+	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 1), sh_accum[1]);
+	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 2), sh_accum[2]);
+	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 3), sh_accum[3]);
+	for (int sh_i = 0; sh_i < 4; sh_i++) {
+		if (first_light_batch) {
+			imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + sh_i), sh_accum[sh_i]);
+		} else {
+			vec3 prev_sh = imageLoad(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + sh_i)).rgb;
+			imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + sh_i), vec4(prev_sh + sh_accum[sh_i].rgb, 1.0));
+		}
+	}
+	// </ELIM>
 #else
 	light_for_texture *= bake_params.exposure_normalization;
-	imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_texture, 1.0));
+	// <ELIM> Batch-accumulate the final direct-light texture (see dest_light above).
+	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_texture, 1.0));
+	if (first_light_batch) {
+		imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_texture, 1.0));
+	} else {
+		vec3 prev_tex = imageLoad(accum_light, ivec3(atlas_pos, params.atlas_slice)).rgb;
+		imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), vec4(prev_tex + light_for_texture, 1.0));
+	}
+	// </ELIM>
 #endif
 
 #ifdef USE_SHADOWMASK
-	imageStore(shadowmask, ivec3(atlas_pos, params.atlas_slice), vec4(shadowmask_value, shadowmask_value, shadowmask_value, 1.0));
+	// <ELIM> Batch-accumulate the directional shadowmask with max() — the
+	// directional light lands in exactly one batch and other batches contribute
+	// 0, so max() over batches yields its shadow. Single batch == original store.
+	// imageStore(shadowmask, ivec3(atlas_pos, params.atlas_slice), vec4(shadowmask_value, shadowmask_value, shadowmask_value, 1.0));
+	float shadowmask_out = shadowmask_value;
+	if (!first_light_batch) {
+		shadowmask_out = max(imageLoad(shadowmask, ivec3(atlas_pos, params.atlas_slice)).r, shadowmask_value);
+	}
+	imageStore(shadowmask, ivec3(atlas_pos, params.atlas_slice), vec4(shadowmask_out, shadowmask_out, shadowmask_out, 1.0));
+	// </ELIM>
 #endif
 
 #endif
