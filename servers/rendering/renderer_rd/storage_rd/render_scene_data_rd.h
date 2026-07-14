@@ -182,6 +182,13 @@ private:
 		float IBL_exposure_normalization; // Adjusts for baked exposure.
 		uint32_t camera_visible_layers;
 		float pass_alpha_multiplier;
+
+		// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork). 0 = off.
+		// std140 rounds the GLSL SceneData tail up to a 16-byte multiple; the C++
+		// pad keeps sizeof(UBO) matching that so prev_ubo and the shader stay aligned.
+		float reflection_lightmap_occlusion_reference;
+		float pad_reflection_occlusion[3];
+		// </ELIM>
 	};
 
 	struct UBODATA {

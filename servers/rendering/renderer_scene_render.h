@@ -116,6 +116,9 @@ public:
 	void environment_set_bg_energy(RID p_env, float p_multiplier, float p_exposure_value);
 	void environment_set_canvas_max_layer(RID p_env, int p_max_layer);
 	void environment_set_ambient_light(RID p_env, const Color &p_color, RS::EnvironmentAmbientSource p_ambient = RS::ENV_AMBIENT_SOURCE_BG, float p_energy = 1.0, float p_sky_contribution = 0.0, RS::EnvironmentReflectionSource p_reflection_source = RS::ENV_REFLECTION_SOURCE_BG);
+	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	void environment_set_reflection_lightmap_occlusion_reference(RID p_env, float p_reference);
+	// </ELIM>
 	void environment_set_camera_feed_id(RID p_env, int p_camera_feed_id);
 
 	RS::EnvironmentBG environment_get_background(RID p_env) const;
@@ -131,6 +134,9 @@ public:
 	float environment_get_ambient_light_energy(RID p_env) const;
 	float environment_get_ambient_sky_contribution(RID p_env) const;
 	RS::EnvironmentReflectionSource environment_get_reflection_source(RID p_env) const;
+	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	float environment_get_reflection_lightmap_occlusion_reference(RID p_env) const;
+	// </ELIM>
 	int environment_get_camera_feed_id(RID p_env) const;
 
 	// Tonemap

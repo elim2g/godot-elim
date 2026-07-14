@@ -109,7 +109,14 @@ private:
 	float ambient_energy = 1.0;
 	float ambient_sky_contribution = 1.0;
 	ReflectionSource reflection_source = REFLECTION_SOURCE_BG;
+	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	// 0.0 = feature off (upstream-identical rendering).
+	float reflection_lightmap_occlusion_reference = 0.0;
+	// </ELIM>
 	void _update_ambient_light();
+	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	void _update_reflection_lightmap_occlusion_reference();
+	// </ELIM>
 
 	// Tonemap
 	ToneMapper tone_mapper = TONE_MAPPER_LINEAR;
@@ -265,6 +272,10 @@ public:
 	float get_ambient_light_sky_contribution() const;
 	void set_reflection_source(ReflectionSource p_source);
 	ReflectionSource get_reflection_source() const;
+	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	void set_reflection_lightmap_occlusion_reference(float p_reference);
+	float get_reflection_lightmap_occlusion_reference() const;
+	// </ELIM>
 
 	// Tonemap
 	void set_tonemapper(ToneMapper p_tone_mapper);

@@ -299,6 +299,12 @@ void RendererSceneRender::environment_set_ambient_light(RID p_env, const Color &
 	environment_storage.environment_set_ambient_light(p_env, p_color, p_ambient, p_energy, p_sky_contribution, p_reflection_source);
 }
 
+// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+void RendererSceneRender::environment_set_reflection_lightmap_occlusion_reference(RID p_env, float p_reference) {
+	environment_storage.environment_set_reflection_lightmap_occlusion_reference(p_env, p_reference);
+}
+// </ELIM>
+
 RS::EnvironmentBG RendererSceneRender::environment_get_background(RID p_env) const {
 	return environment_storage.environment_get_background(p_env);
 }
@@ -350,6 +356,12 @@ float RendererSceneRender::environment_get_ambient_sky_contribution(RID p_env) c
 RS::EnvironmentReflectionSource RendererSceneRender::environment_get_reflection_source(RID p_env) const {
 	return environment_storage.environment_get_reflection_source(p_env);
 }
+
+// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+float RendererSceneRender::environment_get_reflection_lightmap_occlusion_reference(RID p_env) const {
+	return environment_storage.environment_get_reflection_lightmap_occlusion_reference(p_env);
+}
+// </ELIM>
 
 void RendererSceneRender::environment_set_camera_feed_id(RID p_env, int p_camera_feed_id) {
 	environment_storage.environment_set_camera_feed_id(p_env, p_camera_feed_id);

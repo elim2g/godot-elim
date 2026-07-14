@@ -81,4 +81,10 @@ struct SceneData {
 	float IBL_exposure_normalization;
 	uint camera_visible_layers;
 	float pass_alpha_multiplier;
+
+	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork). 0 = off.
+	// std140 auto-pads the struct tail to a 16-byte multiple; the C++ UBO mirror
+	// carries an explicit pad[3] so sizeof matches this reflection-rounded layout.
+	float reflection_lightmap_occlusion_reference;
+	// </ELIM>
 };

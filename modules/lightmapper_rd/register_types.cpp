@@ -70,13 +70,11 @@ void initialize_lightmapper_rd_module(ModuleInitializationLevel p_level) {
 	// Upper clamp on the cost-aware batch size above (and the light count below which
 	// a bake still runs in a single, bit-identical batch). See LightmapperRD::bake().
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/max_lights_per_pass", PROPERTY_HINT_RANGE, "1,65536,1,or_greater"), 256);
-	// Adaptive surface-light patch budget: emissive maps coarsen their patch tiling to
-	// target ~this many area patches total (never finer than the fixed PATCH_AREA tile),
-	// keeping the O(texels x lights) direct pass off the GPU-TDR cliff on big/over-applied
-	// emissive geometry. Lower to bake heavier maps faster (coarser emitter light); raise
-	// for finer emitter falloff on maps that bake comfortably. Read in
-	// LightmapGI::_collect_surface_light_patches() (defaults to SURFACE_LIGHT_TARGET_PATCHES).
-	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/surface_light_target_patches", PROPERTY_HINT_RANGE, "64,16384,1,or_greater"), 3000);
+	// Visibility rays per texel per analytic area-poly surface light (direct
+	// pass). The analytic term is exact; these rays only estimate occlusion, so
+	// noise appears solely in partial-shadow regions. Read into the push
+	// constant in LightmapperRD::bake().
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_quality/surface_light_visibility_rays", PROPERTY_HINT_RANGE, "1,256,1"), 16);
 	// </ELIM>
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/max_transparency_rays", PROPERTY_HINT_RANGE, "1,256,1,or_greater"), 8);
 

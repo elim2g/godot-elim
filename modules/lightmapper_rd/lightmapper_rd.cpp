@@ -148,15 +148,37 @@ void LightmapperRD::add_spot_light(const String &p_name, bool p_static, const Ve
 	light_metadata.push_back(md);
 }
 
-// <ELIM> q3map2-style surface-light sample patch. Reuses the punctual Light
-// struct: `attenuation` carries the patch AREA (form-factor numerator +
-// near-field regularizer), `size` the patch radius (drives the Vogel-disk
-// soft shadowing so shadow rays area-sample the patch footprint), and
-// `shadow_blur` must be 1.0 — it scales both the AA jitter and the disk;
-// 0 would silently disable the area sampling.
-void LightmapperRD::add_area_patch_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range) {
+// <ELIM> Analytic polygonal surface light: one light per emissive island,
+// carrying its triangle geometry (flat v0,v1,v2 triples, winding-normalized
+// and bias-offset by the caller) in the poly_verts SSBO. Reuses the punctual
+// Light struct: `attenuation` carries the island AREA (reference), `size` the
+// island bounding radius (reference), `pad` the first vec4 index into the
+// polygon buffer, and `cos_spot_angle` the bit-cast triangle count. w of each
+// triangle's first vec4 stores the normalized area CDF after that triangle,
+// for area-weighted visibility sampling. lights.sort() is safe: the reference
+// travels inside the struct.
+void LightmapperRD::add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts) {
+	const int tri_count = p_poly_verts.size() / 3;
+	ERR_FAIL_COND_MSG(tri_count < 1 || p_poly_verts.size() % 3 != 0, vformat("Area poly light '%s' needs a non-empty multiple-of-3 vertex list (got %d).", p_name, p_poly_verts.size()));
+
+	// Per-triangle areas for the sampling CDF. A zero-area polygon can't emit.
+	LocalVector<float> tri_areas;
+	tri_areas.resize(tri_count);
+	double area_total = 0.0;
+	for (int t = 0; t < tri_count; t++) {
+		const Vector3 &a = p_poly_verts[t * 3 + 0];
+		const Vector3 &b = p_poly_verts[t * 3 + 1];
+		const Vector3 &c = p_poly_verts[t * 3 + 2];
+		tri_areas[t] = 0.5f * (b - a).cross(c - a).length();
+		area_total += (double)tri_areas[t];
+	}
+	if (area_total <= 0.0) {
+		WARN_PRINT(vformat("Area poly light '%s' has zero polygon area; skipped.", p_name));
+		return;
+	}
+
 	Light l;
-	l.type = LIGHT_TYPE_AREA_PATCH;
+	l.type = LIGHT_TYPE_AREA_POLY;
 	l.position[0] = p_position.x;
 	l.position[1] = p_position.y;
 	l.position[2] = p_position.z;
@@ -171,13 +193,31 @@ void LightmapperRD::add_area_patch_light(const String &p_name, bool p_static, co
 	l.energy = p_energy;
 	l.indirect_energy = p_indirect_energy;
 	l.static_bake = p_static;
-	l.size = Math::sqrt(p_area / (float)Math::PI);
 	l.shadow_blur = 1.0f;
+
+	l.pad = poly_verts_data.size() / 4;
+	uint32_t tc_bits = (uint32_t)tri_count;
+	memcpy(&l.cos_spot_angle, &tc_bits, sizeof(uint32_t));
+
+	float bounding_radius = 0.0f;
+	double cdf = 0.0;
+	for (int t = 0; t < tri_count; t++) {
+		cdf += (double)tri_areas[t] / area_total;
+		for (int k = 0; k < 3; k++) {
+			const Vector3 &v = p_poly_verts[t * 3 + k];
+			poly_verts_data.push_back(v.x);
+			poly_verts_data.push_back(v.y);
+			poly_verts_data.push_back(v.z);
+			poly_verts_data.push_back(k == 0 ? (float)cdf : 0.0f);
+			bounding_radius = MAX(bounding_radius, p_position.distance_to(v));
+		}
+	}
+	l.size = bounding_radius;
 	lights.push_back(l);
 
 	LightMetadata md;
 	md.name = p_name;
-	md.type = LIGHT_TYPE_AREA_PATCH;
+	md.type = LIGHT_TYPE_AREA_POLY;
 	light_metadata.push_back(md);
 }
 // </ELIM>
@@ -448,7 +488,7 @@ Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_
 	return BAKE_OK;
 }
 
-void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, AABB &bounds, int grid_size, uint32_t p_cluster_size, Vector<Probe> &p_probe_positions, GenerateProbes p_generate_probes, Vector<int> &slice_triangle_count, Vector<int> &slice_seam_count, RID &vertex_buffer, RID &triangle_buffer, RID &lights_buffer, RID &r_triangle_indices_buffer, RID &r_cluster_indices_buffer, RID &r_cluster_aabbs_buffer, RID &probe_positions_buffer, RID &grid_texture, RID &seams_buffer, BakeStepFunc p_step_function, void *p_bake_userdata) {
+void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, AABB &bounds, int grid_size, uint32_t p_cluster_size, Vector<Probe> &p_probe_positions, GenerateProbes p_generate_probes, Vector<int> &slice_triangle_count, Vector<int> &slice_seam_count, RID &vertex_buffer, RID &triangle_buffer, RID &lights_buffer, RID &r_triangle_indices_buffer, RID &r_cluster_indices_buffer, RID &r_cluster_aabbs_buffer, RID &probe_positions_buffer, RID &grid_texture, RID &seams_buffer, RID &r_poly_verts_buffer, BakeStepFunc p_step_function, void *p_bake_userdata) {
 	HashMap<Vertex, uint32_t, VertexHash> vertex_map;
 
 	//fill triangles array and vertex array
@@ -771,6 +811,14 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 		static const Probe empty_probes[1];
 		Span<uint8_t> pb = (p_probe_positions.is_empty() ? Span(empty_probes) : p_probe_positions.span()).reinterpret<uint8_t>();
 		probe_positions_buffer = rd->storage_buffer_create(pb.size(), pb);
+
+		// <ELIM> Surface-light island polygon vertices (binding 13). Even when
+		// there are no area-poly lights, the buffer must exist.
+		static const float empty_poly_verts[4] = {};
+		Span<float> pv_span = poly_verts_data.is_empty() ? Span<float>(empty_poly_verts, 4) : poly_verts_data.span();
+		Span<uint8_t> pvb = pv_span.reinterpret<uint8_t>();
+		r_poly_verts_buffer = rd->storage_buffer_create(pvb.size(), pvb);
+		// </ELIM>
 	}
 
 	{ //grid
@@ -1401,9 +1449,13 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	RID grid_texture;
 	RID seams_buffer;
 	RID probe_positions_buffer;
+	// <ELIM> Surface-light island polygon vertices (binding 13).
+	RID poly_verts_buffer;
+	// </ELIM>
 
 	Vector<int> slice_seam_count;
 
+// <ELIM> poly_verts_buffer added (comments can't live inside the macro body).
 #define FREE_BUFFERS                       \
 	rd->free_rid(bake_parameters_buffer);  \
 	rd->free_rid(vertex_buffer);           \
@@ -1414,10 +1466,11 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	rd->free_rid(cluster_aabbs_buffer);    \
 	rd->free_rid(grid_texture);            \
 	rd->free_rid(seams_buffer);            \
-	rd->free_rid(probe_positions_buffer);
+	rd->free_rid(probe_positions_buffer);  \
+	rd->free_rid(poly_verts_buffer);
 
 	const uint32_t cluster_size = 16;
-	_create_acceleration_structures(rd, atlas_size, atlas_slices, bounds, grid_size, cluster_size, probe_positions, p_generate_probes, slice_triangle_count, slice_seam_count, vertex_buffer, triangle_buffer, lights_buffer, triangle_indices_buffer, cluster_indices_buffer, cluster_aabbs_buffer, probe_positions_buffer, grid_texture, seams_buffer, p_step_function, p_bake_userdata);
+	_create_acceleration_structures(rd, atlas_size, atlas_slices, bounds, grid_size, cluster_size, probe_positions, p_generate_probes, slice_triangle_count, slice_seam_count, vertex_buffer, triangle_buffer, lights_buffer, triangle_indices_buffer, cluster_indices_buffer, cluster_aabbs_buffer, probe_positions_buffer, grid_texture, seams_buffer, poly_verts_buffer, p_step_function, p_bake_userdata);
 
 	// The index of the directional light used for shadowmasking.
 	int shadowmask_light_idx = -1;
@@ -1618,6 +1671,17 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			u.append_id(cluster_aabbs_buffer);
 			base_uniforms.push_back(u);
 		}
+		// <ELIM> Surface-light island polygon vertices. Declared in
+		// lm_common_inc.glsl so every set-0 consumer sees it; RD ignores
+		// provided uniforms a shader's reflection doesn't use.
+		{
+			RD::Uniform u;
+			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			u.binding = 13;
+			u.append_id(poly_verts_buffer);
+			base_uniforms.push_back(u);
+		}
+		// </ELIM>
 	}
 
 	RID raster_base_uniform = rd->uniform_set_create(base_uniforms, rasterize_shader, 0);
@@ -1742,6 +1806,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 	PushConstant push_constant;
 	push_constant.denoiser_range = p_use_denoiser ? p_denoiser_range : 1.0;
+	// <ELIM> Visibility rays per texel for analytic area-poly surface lights.
+	push_constant.surface_light_vis_rays = CLAMP(int(GLOBAL_GET("rendering/lightmapping/bake_quality/surface_light_visibility_rays")), 1, 256);
+	// </ELIM>
 
 	/* UNOCCLUDE */
 	{

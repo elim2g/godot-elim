@@ -1724,14 +1724,31 @@ void fragment_shader(in SceneData scene_data) {
 		indirect_specular_light *= scene_data.ambient_light_color_energy.a;
 	}
 
+	// <ELIM> Phase-2 lightmap specular occlusion: non-lightmapped instances earn no
+	// unoccluded sky specular. Zero the sky-cubemap contribution here, before SSR and
+	// reflection-probe mixing, so those (earned) reflections survive. This matches the
+	// Phase-1 baseline for dynamic/filler geometry. reference==0 disables the feature.
+#ifndef USE_LIGHTMAP
+	if (scene_data.reflection_lightmap_occlusion_reference > 0.0) {
+		indirect_specular_light = vec3(0.0);
+	}
+#endif
+	// </ELIM>
+
 #if defined(CUSTOM_RADIANCE_USED)
 	indirect_specular_light = mix(indirect_specular_light, custom_radiance.rgb, custom_radiance.a);
 #endif
 
-#ifndef USE_LIGHTMAP
+	// <ELIM> Scene-ambient computed for BOTH variants (upstream computed it only in
+	// the #ifndef USE_LIGHTMAP path, writing ambient_light directly). Non-lightmapped
+	// surfaces still take it as their ambient below; lightmapped surfaces add it as a
+	// dimmed FILL after the lightmap sample (the additive fill further down). When the
+	// ambient source is DISABLED the USE_AMBIENT_LIGHT flag is unset, so scene_ambient
+	// stays 0 and the lightmap path is byte-identical to upstream.
+	vec3 scene_ambient = vec3(0.0);
 	//lightmap overrides everything
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_LIGHT)) {
-		ambient_light = scene_data.ambient_light_color_energy.rgb;
+		scene_ambient = scene_data.ambient_light_color_energy.rgb;
 
 		if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_CUBEMAP)) {
 			vec3 ambient_dir = scene_data.radiance_inverse_xform * indirect_normal;
@@ -1745,10 +1762,13 @@ void fragment_shader(in SceneData scene_data) {
 			vec3 cubemap_ambient = textureLod(sampler2D(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ambient_uv, roughness_lod).rgb;
 #endif //USE_RADIANCE_OCTMAP_ARRAY
 			cubemap_ambient *= scene_data.IBL_exposure_normalization;
-			ambient_light = mix(ambient_light, cubemap_ambient * scene_data.ambient_light_color_energy.a, scene_data.ambient_color_sky_mix);
+			scene_ambient = mix(scene_ambient, cubemap_ambient * scene_data.ambient_light_color_energy.a, scene_data.ambient_color_sky_mix);
 		}
 	}
+#ifndef USE_LIGHTMAP
+	ambient_light = scene_ambient;
 #endif // USE_LIGHTMAP
+	// </ELIM>
 #if defined(CUSTOM_IRRADIANCE_USED)
 	ambient_light = mix(ambient_light, custom_irradiance.rgb, custom_irradiance.a);
 #endif
@@ -1797,6 +1817,10 @@ void fragment_shader(in SceneData scene_data) {
 #ifndef AMBIENT_LIGHT_DISABLED
 #ifdef USE_LIGHTMAP
 
+	// <ELIM> Phase-2 lightmap specular occlusion: baked DC (L0) radiance, captured
+	// during lightmap sampling below and used to occlude sky-cubemap ambient specular.
+	vec3 lm_dc_radiance = vec3(0.0);
+	// </ELIM>
 	//lightmap
 	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP_CAPTURE)) { //has lightmap capture
 		uint index = instances.data[instance_index].gi_offset;
@@ -1823,6 +1847,10 @@ void fragment_shader(in SceneData scene_data) {
 								 c[2] * lightmap_captures.data[index].sh[7].rgb * wnormal.x * wnormal.z +
 								 c[4] * lightmap_captures.data[index].sh[8].rgb * (wnormal.x * wnormal.x - wnormal.y * wnormal.y)) *
 				scene_data.IBL_exposure_normalization;
+
+		// <ELIM> Phase-2: DC (l0) term of the SH probe = direction-independent irradiance.
+		lm_dc_radiance = c[0] * lightmap_captures.data[index].sh[0].rgb * scene_data.IBL_exposure_normalization;
+		// </ELIM>
 
 	} else if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) { // has actual lightmap
 		bool uses_sh = bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_SH_LIGHTMAP);
@@ -1855,18 +1883,49 @@ void fragment_shader(in SceneData scene_data) {
 			float en = lightmaps.data[ofs].exposure_normalization;
 
 			ambient_light += lm_light_l0 * en;
+			// <ELIM> Phase-2: capture the DC (L0) radiance for specular occlusion.
+			lm_dc_radiance = lm_light_l0 * en;
+			// </ELIM>
 			ambient_light += lm_light_l1n1 * n.y * (lm_light_l0 * en * 4.0);
 			ambient_light += lm_light_l1_0 * n.z * (lm_light_l0 * en * 4.0);
 			ambient_light += lm_light_l1p1 * n.x * (lm_light_l0 * en * 4.0);
 
 		} else {
+			// <ELIM> Phase-2: capture the flat lightmap value as DC radiance for occlusion.
+			vec3 lm_flat;
 			if (sc_use_lightmap_bicubic_filter()) {
-				ambient_light += textureArray_bicubic(lightmap_textures[ofs], uvw, lightmaps.data[ofs].light_texture_size).rgb * lightmaps.data[ofs].exposure_normalization;
+				lm_flat = textureArray_bicubic(lightmap_textures[ofs], uvw, lightmaps.data[ofs].light_texture_size).rgb * lightmaps.data[ofs].exposure_normalization;
 			} else {
-				ambient_light += textureLod(sampler2DArray(lightmap_textures[ofs], SAMPLER_LINEAR_CLAMP), uvw, 0.0).rgb * lightmaps.data[ofs].exposure_normalization;
+				lm_flat = textureLod(sampler2DArray(lightmap_textures[ofs], SAMPLER_LINEAR_CLAMP), uvw, 0.0).rgb * lightmaps.data[ofs].exposure_normalization;
 			}
+			ambient_light += lm_flat;
+			lm_dc_radiance = lm_flat;
+			// </ELIM>
 		}
 	}
+
+	// <ELIM> Phase-2 lightmap specular occlusion: scale sky-cubemap ambient specular
+	// by how much baked light actually reaches this texel. factor = clamp(luma(DC) /
+	// reference, 0, 1), squared for a soft matte-biased knee (under-occluding is the
+	// worse failure). Applied before SSR / reflection-probe mixing so those survive.
+	// reference==0 disables the feature.
+	if (scene_data.reflection_lightmap_occlusion_reference > 0.0) {
+		float lm_luma = dot(lm_dc_radiance, vec3(0.2126, 0.7152, 0.0722));
+		float lm_occ = clamp(lm_luma / scene_data.reflection_lightmap_occlusion_reference, 0.0, 1.0);
+		lm_occ *= lm_occ;
+		indirect_specular_light *= lm_occ;
+	}
+	// </ELIM>
+
+	// <ELIM> Additive dimmed scene-ambient FILL on lightmapped surfaces (addendum).
+	// Upstream Forward+ gates sky ambient behind #ifndef USE_LIGHTMAP, so baked walls
+	// never saw the runtime ambient term; this adds it on top of the lightmap sample.
+	// scene_ambient is 0 when the ambient source is DISABLED (neutral for upstream and
+	// the GLES3-baked fallback). Placed AFTER the DC-based occlusion above (so the
+	// specular factor reads pre-fill lightmap DC) and BEFORE ambient_light *= ao (so
+	// SSAO shapes the fill).
+	ambient_light += scene_ambient;
+	// </ELIM>
 #else
 
 	if (sc_use_forward_gi() && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_SDFGI)) { //has lightmap capture

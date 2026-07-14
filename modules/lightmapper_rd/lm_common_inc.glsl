@@ -47,7 +47,7 @@ vertices;
 #define SURFACE_FLAG_SKY 1u
 #define SURFACE_FLAG_TRACE_ONLY 2u
 // Bit 2 = surface light: emission is integrated analytically as
-// LIGHT_TYPE_AREA_PATCH lights, so the bounce pass must not also add the
+// LIGHT_TYPE_AREA_POLY lights, so the bounce pass must not also add the
 // rasterized emission (double count).
 #define SURFACE_FLAG_SURFACE_LIGHT 4u
 // </ELIM>
@@ -84,10 +84,12 @@ triangle_indices;
 #define LIGHT_TYPE_DIRECTIONAL 0
 #define LIGHT_TYPE_OMNI 1
 #define LIGHT_TYPE_SPOT 2
-// <ELIM> Surface-light sample patch; must match Lightmapper::LIGHT_TYPE_AREA_PATCH.
-// For this type: direction = patch normal, attenuation = patch AREA (repurposed),
-// size = patch radius.
-#define LIGHT_TYPE_AREA_PATCH 3
+// <ELIM> Analytic polygonal surface light; must match
+// Lightmapper::LIGHT_TYPE_AREA_POLY. For this type: direction = island
+// normal, attenuation = island area (reference), size = island bounding
+// radius (reference), pad = first vec4 index into poly_verts,
+// cos_spot_angle = bit-cast triangle count.
+#define LIGHT_TYPE_AREA_POLY 3
 // </ELIM>
 
 struct Light {
@@ -147,6 +149,17 @@ layout(set = 0, binding = 12, std430) restrict readonly buffer ClusterAABBs {
 	ClusterAABB data[];
 }
 cluster_aabbs;
+
+// <ELIM> Surface-light island polygons: triples of vec4 forming triangles.
+// xyz = world-space vertex, pre-offset by the bake bias along the island
+// normal, winding normalized CPU-side so cross(v1-v0, v2-v0) points along the
+// island normal. w of each triangle's FIRST vertex = normalized area CDF after
+// that triangle (for area-weighted visibility sampling); w = 0 elsewhere.
+layout(set = 0, binding = 13, std430) restrict readonly buffer PolyVerts {
+	vec4 data[];
+}
+poly_verts;
+// </ELIM>
 
 // Fragment action constants
 const uint FA_NONE = 0;

@@ -1261,6 +1261,9 @@ public:
 	virtual void environment_set_bg_energy(RID p_env, float p_multiplier, float p_exposure_value) = 0;
 	virtual void environment_set_canvas_max_layer(RID p_env, int p_max_layer) = 0;
 	virtual void environment_set_ambient_light(RID p_env, const Color &p_color, EnvironmentAmbientSource p_ambient = ENV_AMBIENT_SOURCE_BG, float p_energy = 1.0, float p_sky_contribution = 0.0, EnvironmentReflectionSource p_reflection_source = ENV_REFLECTION_SOURCE_BG) = 0;
+	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	virtual void environment_set_reflection_lightmap_occlusion_reference(RID p_env, float p_reference) = 0;
+	// </ELIM>
 	virtual void environment_set_camera_feed_id(RID p_env, int p_camera_feed_id) = 0;
 
 	enum EnvironmentGlowBlendMode {

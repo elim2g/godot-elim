@@ -114,6 +114,13 @@ layout(push_constant, std430) uniform Params {
 	ivec2 region_ofs;
 	uint probe_count;
 	uint denoiser_range;
+
+	// <ELIM> Visibility rays per texel for analytic area-poly surface lights.
+	// Occupies what was C++-side padding; keeps the declared block at 48 bytes,
+	// matching sizeof(PushConstant) in lightmapper_rd.h.
+	uint surface_light_vis_rays;
+	uint pad0;
+	// </ELIM>
 }
 params;
 
@@ -528,6 +535,49 @@ vec2 get_vogel_disk(float p_i, float p_rotation, float p_sample_count_sqrt) {
 	return vec2(cos(theta), sin(theta)) * r;
 }
 
+// <ELIM> Scalar transmittance + transparent-surface tint along origin->target,
+// replicating the punctual soft-shadow transparency-loop semantics (see the
+// loops in trace_direct_light): 1.0 = fully visible, 0.0 = blocked; a
+// transparent hit multiplies the scalar by (1 - alpha) and tints r_color, an
+// opaque hit zeroes it. r_color starts at the light colour and carries tint
+// ONLY — the scalar carries all transmittance, exactly like penumbra vs
+// penumbra_color in the punctual paths.
+float trace_shadow_transmittance(vec3 p_origin, vec3 p_target, bool p_skip_sky, vec3 p_light_color, out vec3 r_color) {
+	const float EPSILON = 0.00001;
+	float transmittance = 0.0;
+	r_color = p_light_color;
+	bool did_hit = false;
+	vec3 dir = normalize(p_target - p_origin);
+	vec3 origin = p_origin;
+	for (uint iter = 0u; iter < bake_params.transparency_rays; iter++) {
+		vec4 hit_albedo = vec4(1.0);
+		vec3 hit_position;
+		uint ret = trace_ray_closest_hit_triangle_albedo_alpha(origin + dir * bake_params.bias, p_target, p_skip_sky, hit_albedo, hit_position);
+		if (ret == RAY_MISS) {
+			if (!did_hit) {
+				transmittance = 1.0;
+			}
+			break;
+		} else if (ret == RAY_FRONT || ret == RAY_BACK) {
+			bool contribute = (ret == RAY_FRONT || !did_hit);
+			if (!did_hit) {
+				transmittance = 1.0;
+				did_hit = true;
+			}
+			if (contribute) {
+				r_color = mix(r_color, r_color * hit_albedo.rgb, hit_albedo.a);
+				transmittance *= 1.0 - hit_albedo.a;
+			}
+			origin = hit_position + dir * bake_params.bias;
+			if (transmittance - EPSILON <= 0.0) {
+				break;
+			}
+		}
+	}
+	return clamp(transmittance, 0.0, 1.0);
+}
+// </ELIM>
+
 void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool p_soft_shadowing, out vec3 r_light, out vec3 r_light_dir, inout uint r_noise, float p_texel_size, out float r_shadow) {
 	const float EPSILON = 0.00001;
 
@@ -551,28 +601,140 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 		dist = length(bake_params.world_size);
 		attenuation = 1.0;
 		soft_shadowing_disk_size = light_data.size;
-	// <ELIM> q3map2-style surface lights: one-sided Lambertian area patch with
-	// form-factor falloff regularized by the patch area (the attenuation slot
-	// is repurposed to carry AREA), so texels beside/near the emitter stay
-	// finite — no saturated blob. size = patch radius, so the existing
-	// Vogel-disk soft shadowing area-samples the patch footprint (correct
-	// penumbrae for free).
-	} else if (light_data.type == LIGHT_TYPE_AREA_PATCH) {
-		light_pos = light_data.position;
-		r_light_dir = normalize(light_pos - p_position);
-		dist = distance(p_position, light_pos);
-		if (dist > light_data.range) {
-			// Energy-derived cutoff; early-out before any shadow rays.
+	// <ELIM> Analytic polygonal surface light: exact Lambert/Baum edge-sum
+	// irradiance from the island polygon (poly_verts triangle triples,
+	// referenced by pad = first vec4 index and cos_spot_angle = bit-cast tri
+	// count) multiplied by stochastic visibility (ratio estimator). Replaces
+	// the centroid-patch approximation: exact at any distance (no near-field
+	// bright spots) and one light per island instead of one per patch. The
+	// block is fully self-contained and returns — the shared cos_r multiply
+	// below must NOT run (the edge sum already contains the receiver cosine),
+	// and the Vogel-disk penumbra machinery is meaningless for a polygon.
+	} else if (light_data.type == LIGHT_TYPE_AREA_POLY) {
+		if (distance(p_position, light_data.position) > light_data.range) {
+			// Energy-derived cutoff (range includes the island bounding radius).
 			return;
 		}
-		float cos_e = dot(light_data.direction, -r_light_dir);
-		if (cos_e < 0.0001) {
-			// Emitter is one-sided; also culls coplanar self-lighting.
+		if (dot(light_data.direction, p_position - light_data.position) < 0.0001) {
+			// One-sided: receiver behind (or in) the emitting plane.
 			return;
 		}
-		float patch_area = light_data.attenuation;
-		attenuation = patch_area * cos_e / (dist * dist + patch_area);
-		soft_shadowing_disk_size = light_data.size / dist;
+
+		uint poly_base = light_data.pad;
+		uint poly_tri_count = floatBitsToUint(light_data.cos_spot_angle);
+		if (poly_tri_count == 0u) {
+			return;
+		}
+
+		// Exact unoccluded irradiance: per-triangle horizon clip + edge sum
+		// over the spherical projection. CPU packing contract: triangles are
+		// wound with their geometric normal ALONG the island normal; for that
+		// winding the canonical += edge sum yields an irradiance vector
+		// pointing away from the lit side, so accumulate NEGATED (derivation:
+		// a downward-facing emitter above a +Z receiver needs its vertices
+		// ordered CW-as-seen-from-the-receiver for a positive += sum, which is
+		// the reverse winding).
+		vec3 e_vec = vec3(0.0);
+		for (uint t = 0u; t < poly_tri_count; t++) {
+			vec3 tv[3] = vec3[](
+					poly_verts.data[poly_base + t * 3u + 0u].xyz - p_position,
+					poly_verts.data[poly_base + t * 3u + 1u].xyz - p_position,
+					poly_verts.data[poly_base + t * 3u + 2u].xyz - p_position);
+			// A receiver texel coincident with a polygon vertex would
+			// normalize a ~zero vector into NaN and poison the whole sum;
+			// dropping the one sliver triangle at exact contact is invisible.
+			if (dot(tv[0], tv[0]) < 1e-12 || dot(tv[1], tv[1]) < 1e-12 || dot(tv[2], tv[2]) < 1e-12) {
+				continue;
+			}
+			// Sutherland-Hodgman clip against the receiver tangent plane
+			// dot(p_normal, x) >= 0 (a clipped triangle has at most 4 verts).
+			vec3 clipped[4];
+			int clipped_count = 0;
+			for (int k = 0; k < 3; k++) {
+				vec3 va = tv[k];
+				vec3 vb = tv[(k + 1) % 3];
+				float da = dot(p_normal, va);
+				float db = dot(p_normal, vb);
+				if (da >= 0.0) {
+					clipped[clipped_count++] = va;
+				}
+				if ((da >= 0.0) != (db >= 0.0)) {
+					clipped[clipped_count++] = mix(va, vb, da / (da - db));
+				}
+			}
+			if (clipped_count < 3) {
+				continue;
+			}
+			for (int k = 0; k < clipped_count; k++) {
+				clipped[k] = normalize(clipped[k]);
+			}
+			for (int k = 0; k < clipped_count; k++) {
+				vec3 va = clipped[k];
+				vec3 vb = clipped[(k + 1) % clipped_count];
+				vec3 cr = cross(va, vb);
+				float crl = length(cr);
+				if (crl > 1e-7) {
+					e_vec -= (0.5 * acos(clamp(dot(va, vb), -1.0, 1.0)) / crl) * cr;
+				}
+			}
+		}
+		float poly_irr = dot(e_vec, p_normal);
+		if (poly_irr <= 0.0001) {
+			return;
+		}
+
+		// Visibility (ratio estimator): the analytic term above stays exact;
+		// N rays toward area-weighted sample points on the island estimate
+		// occlusion only. Per-ray transparent-tint / opaque-block semantics
+		// match the punctual paths via trace_shadow_transmittance. Noise can
+		// only appear where visibility is partial.
+		uint vis_rays = p_soft_shadowing ? max(params.surface_light_vis_rays, 1u) : 1u;
+		// Texel-AA origin jitter, capped in world units for the same reason
+		// as the punctual paths (meter-scale texels relocate origins through
+		// walls); the 1-ray bounce/probe path keeps the exact origin.
+		float poly_aa_jitter = min(p_texel_size, 0.05);
+		vec3 poly_aux = p_normal.y < 0.777 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+		vec3 poly_tangent = normalize(cross(p_normal, poly_aux));
+		vec3 poly_bitan = normalize(cross(p_normal, poly_tangent));
+
+		float vis = 0.0;
+		vec3 vis_color = vec3(0.0);
+		for (uint i = 0u; i < vis_rays; i++) {
+			vec3 origin = p_position;
+			if (p_soft_shadowing) {
+				vec2 disk_sample = (halton_map[i % uint(AA_SAMPLES)] - vec2(0.5)) * poly_aa_jitter;
+				origin -= disk_sample.x * poly_tangent + disk_sample.y * poly_bitan;
+			}
+			// Area-weighted triangle pick (normalized CDF in w of each
+			// triangle's first vertex), then a uniform barycentric point.
+			float u = randomize(r_noise);
+			uint pick = poly_tri_count - 1u;
+			for (uint t = 0u; t < poly_tri_count; t++) {
+				if (u <= poly_verts.data[poly_base + t * 3u].w) {
+					pick = t;
+					break;
+				}
+			}
+			vec3 pa = poly_verts.data[poly_base + pick * 3u + 0u].xyz;
+			vec3 pb = poly_verts.data[poly_base + pick * 3u + 1u].xyz;
+			vec3 pc = poly_verts.data[poly_base + pick * 3u + 2u].xyz;
+			float r1 = sqrt(randomize(r_noise));
+			float r2 = randomize(r_noise);
+			vec3 target = pa * (1.0 - r1) + pb * (r1 * (1.0 - r2)) + pc * (r1 * r2);
+
+			vec3 sample_color;
+			vis += trace_shadow_transmittance(origin, target, skip_sky, light_data.color.rgb, sample_color);
+			vis_color += sample_color;
+		}
+		vis /= float(vis_rays);
+		vis_color /= float(vis_rays);
+
+		// Net incoming direction = normalized vector irradiance (better for
+		// the SH/directional accumulation than direction-to-centroid).
+		r_light_dir = normalize(e_vec);
+		r_light = light_data.energy * poly_irr * vis * vis_color;
+		r_shadow = vis;
+		return;
 	// </ELIM>
 	} else {
 		light_pos = light_data.position;

@@ -189,6 +189,20 @@ RS::EnvironmentReflectionSource RendererEnvironmentStorage::environment_get_refl
 	return env->reflection_source;
 }
 
+// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+void RendererEnvironmentStorage::environment_set_reflection_lightmap_occlusion_reference(RID p_env, float p_reference) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	env->reflection_lightmap_occlusion_reference = p_reference;
+}
+
+float RendererEnvironmentStorage::environment_get_reflection_lightmap_occlusion_reference(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.0);
+	return env->reflection_lightmap_occlusion_reference;
+}
+// </ELIM>
+
 void RendererEnvironmentStorage::environment_set_camera_feed_id(RID p_env, int p_camera_feed_id) {
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL(env);

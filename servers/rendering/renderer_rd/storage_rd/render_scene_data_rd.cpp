@@ -205,6 +205,10 @@ void RenderSceneDataRD::update_ubo(RID p_uniform_buffer, RS::ViewportDebugDraw p
 			RendererRD::MaterialStorage::store_transform_3x3(sky_transform, ubo.radiance_inverse_xform);
 		}
 
+		// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+		ubo.reflection_lightmap_occlusion_reference = render_scene_render->environment_get_reflection_lightmap_occlusion_reference(p_env);
+		// </ELIM>
+
 		ubo.flags |= render_scene_render->environment_get_fog_enabled(p_env) ? SCENE_DATA_FLAGS_USE_FOG : 0;
 		ubo.fog_density = render_scene_render->environment_get_fog_density(p_env);
 		ubo.fog_height = render_scene_render->environment_get_fog_height(p_env);

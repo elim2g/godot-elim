@@ -36,6 +36,9 @@
 #include "core/config/project_settings.h"
 #include "core/io/config_file.h"
 #include "core/math/delaunay_3d.h"
+// <ELIM> Surface-light island convex hulls.
+#include "core/math/geometry_2d.h"
+// </ELIM>
 #include "core/object/object.h"
 #include "scene/3d/lightmap_probe.h"
 #include "scene/3d/mesh_instance_3d.h"
@@ -984,69 +987,59 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	return _bake_finalize_internal(state, p_bake_step, p_bake_userdata);
 }
 
-// <ELIM> q3map2-style surface lights: surfaces whose effective material carries
-// the bool meta "tnt_surface_light" are subdivided into area sample patches and
-// added as LIGHT_TYPE_AREA_PATCH lights, so emissive faces are integrated
-// analytically in the direct pass (no Monte Carlo blotch).
-static constexpr float SURFACE_LIGHT_PATCH_AREA = 4.0f; // m²; ~2 m patch edge.
-static constexpr float SURFACE_LIGHT_MIN_PATCH_AREA = 1e-4f; // Degenerate-sliver cull.
-static constexpr int SURFACE_LIGHT_MAX_SUBDIV_DEPTH = 16; // Bisection halves area per step.
-// These are NOT a quality/performance budget — this is an offline bake, and the
-// real per-texel cost bound is SURFACE_LIGHT_CUTOFF (below), which keeps each
-// patch's derived range genuinely local regardless of how many patches exist
-// in total. They exist purely as a backstop against a pathological/misconfigured
-// map (e.g. a texture accidentally flagged as a surface light across the whole
-// level) hanging the bake or exhausting VRAM, not to trade away legitimate
-// light contribution. Past SURFACE_LIGHT_MAX_PATCHES_TOTAL, further emitter
-// faces are skipped entirely (a real, logged loss of light) — if you hit either
-// ceiling on a legitimate map, raise it rather than accept the drop.
-static constexpr uint32_t SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE = 16384;
-static constexpr uint32_t SURFACE_LIGHT_MAX_PATCHES_TOTAL = 131072;
-// Adaptive patch budget: the effective subdivision tile area is coarsened UP so a
-// huge or over-applied emissive map targets ~this many patches instead of one per
-// PATCH_AREA tile (which on a big level runs the O(texels x lights) direct pass into
-// the GPU-TDR cliff). Never finer than SURFACE_LIGHT_PATCH_AREA, so maps under the
-// budget bake byte-identically to the fixed-tile behavior. The hard caps above stay
-// as a pathological backstop. This does NOT touch the per-patch range/CUTOFF cull —
-// coverage over a large surface must still come from many LOCAL patches.
-static constexpr uint32_t SURFACE_LIGHT_TARGET_PATCHES = 3000;
-// Lambertian radiance→irradiance normalization; the single calibration knob
-// keeping emitter energies tuned against the old bounce-hit estimator in the
-// same visual ballpark.
+// <ELIM> Analytic polygonal surface lights: surfaces whose effective material
+// carries the bool meta "tnt_surface_light" are merged into coplanar islands,
+// and each island becomes ONE LIGHT_TYPE_AREA_POLY light carrying its polygon
+// geometry — integrated in the direct pass with exact edge-sum irradiance and
+// ray-estimated visibility (no centroid discretization, no Monte Carlo blotch).
+static constexpr float SURFACE_LIGHT_MIN_AREA = 1e-4f; // Degenerate-sliver island cull.
+// Per-island triangle cap. Convex islands (the overwhelming common case —
+// brush faces are convex, however T-junction-fragmented) collapse to a convex
+// hull fan of a handful of triangles, far below this. A NON-convex island
+// (coplanar-merged multi-brush face) keeps its raw member triangles only up to
+// this cap; past it, the island falls back to its hull fan with emitted
+// radiance scaled by island_area/hull_area (energy-conserving, geometrically
+// smeared over the hull — logged, and rare enough to accept).
+static constexpr uint32_t SURFACE_LIGHT_MAX_POLY_TRIS = 64;
+// Global polygon-vertex backstop against a pathological/misconfigured map
+// (e.g. a texture accidentally flagged emissive across the whole level)
+// exhausting VRAM. Past it, further emitter islands are dropped entirely (a
+// real, logged loss of light) — on a legitimate map, raise it rather than
+// accept the drop.
+static constexpr uint32_t SURFACE_LIGHT_MAX_POLY_VERTS_TOTAL = 262144;
+// Convex-exactness tolerance: an island whose in-plane convex hull area is
+// within 1% of its member-triangle area IS its hull (the excess is weld/float
+// slop), so the hull fan reproduces it exactly with minimal triangles.
+static constexpr float SURFACE_LIGHT_HULL_TOLERANCE = 1.01f;
+// Lambertian radiance→irradiance normalization (the exitance of a diffuse
+// emitter of radiance L is πL; energies are authored as radiance).
 static constexpr float SURFACE_LIGHT_ENERGY_SCALE = 1.0f / (float)Math::PI;
-// Range-cull contribution threshold. Must keep the derived range GENUINELY
-// LOCAL (a handful of world units), not just small relative to energy: for a
-// large emissive surface, adjacent patches sit much closer to each other than
-// any energy-derived range, so a lenient cutoff gives near-zero effective
-// culling between them — every texel near the surface then evaluates most/all
-// of its patches, each with a full soft-shadow ray trace. On a real map with a
-// wide lit surface spanning many chunks this blew the per-texel light count
-// into the thousands, made a single bake dispatch run long enough to trip the
-// GPU driver's TDR watchdog, and reset the device mid-bake (DEVICE_REMOVED).
-// Coverage over a large surface should come from MANY nearby patches
-// contributing locally, not one patch reaching across the whole map — that is
-// also the physically appropriate way tiled area lights work.
-static constexpr float SURFACE_LIGHT_CUTOFF = 0.04f;
+// Range-cull contribution threshold: the derived range solves the unshadowed
+// peak contribution E·A/d² = CUTOFF. With one light per island (not one per
+// patch), per-texel cost is bounded by island count × visibility rays, so the
+// range no longer needs to be artificially local the way the old per-patch
+// scheme did (its 0.04 cutoff + 40 m clamp existed purely because patches-in-
+// range multiplied into the TDR cliff) — a large emitter legitimately reaches
+// far.
+static constexpr float SURFACE_LIGHT_CUTOFF = 0.005f;
+static constexpr float SURFACE_LIGHT_RANGE_MAX = 512.0f;
 // Connectivity + coplanarity merge. The importer's vertex-weld / T-junction pass
 // re-triangulates one logical flat emissive brush face into dozens–hundreds of
-// sub-PATCH_AREA slivers (needed to seal see-through seam cracks against neighbouring
-// geometry — see surface_gatherer.cpp; must NOT be bypassed). Emitting those fragments
-// as individual patches is doubly wrong: patch count tracks the raw fragment count
-// (blowing the caps, after which whole emitter faces are silently dropped), and each
-// fragment's tiny area gates its derived range (range ∝ peak·area) to near-zero so most
-// emitter energy contributes nothing. Fix: flood-fill each surface's emitter triangles
-// into connected components gated by exact coplanarity — every sliver of one original
+// tiny slivers (needed to seal see-through seam cracks against neighbouring
+// geometry — see surface_gatherer.cpp; must NOT be bypassed). Emitting those
+// fragments as individual lights would track the raw fragment count instead of
+// real face count. Fix: flood-fill each surface's emitter triangles into
+// connected components gated by exact coplanarity — every sliver of one original
 // planar brush face is mutually edge-adjacent and coplanar, so they collapse into ONE
-// component regardless of fragmentation, recovering the true minimal-vertex face. Two
+// island regardless of fragmentation, recovering the true logical face. Two
 // genuinely different faces/fixtures are either not edge-adjacent or (if they touch)
-// disagree in normal, so they stay distinct. Patch count then tracks real face area.
+// disagree in normal, so they stay distinct. Light count then tracks real faces.
 static constexpr float SURFACE_LIGHT_WELD_EPS = 1e-3f; // Vert quantization for edge matching; finer than welded-coincident spacing.
 static constexpr float SURFACE_LIGHT_COPLANAR_DOT = 0.9995f; // Tight near-parallel gate; brush faces are exactly planar, not "roughly flat".
-static constexpr float SURFACE_LIGHT_TILE_CELL = 2.0f; // sqrt(PATCH_AREA); cell size for retiling an oversized (large) component.
 // Coplanar-contact occlusion cull. An emitter texture flags EVERY face of its brush
 // (e.g. all six faces of a lava prism), so the underside/sides sandwiched face-to-face
-// against the sealed shell or a wall emit straight into solid: wasted area patches that
-// still cost a full O(texels x lights) direct-pass shadow trace. Detect it purely
+// against the sealed shell or a wall emit straight into solid: wasted lights that
+// still cost direct-pass visibility rays. Detect it purely
 // geometrically — a solid non-emitter occluder triangle that is coincident with (SAME
 // plane), anti-parallel to, and overlapping the emitter face at its centroid means the
 // face is pressed flush against solid. Deliberately keyed on TRUE coincidence (offset ≈ 0
@@ -1060,25 +1053,34 @@ static constexpr float SURFACE_LIGHT_CONTACT_EPS = 0.02f; // m; flush-coincidenc
 static constexpr float SURFACE_LIGHT_CONTACT_DOT = -0.99f; // Anti-parallel gate: opposing faces point into each other (dot ≈ -1).
 static constexpr float SURFACE_LIGHT_OCC_CELL = 4.0f; // m; occluder spatial-hash cell (chunked worldspawn keeps face tris well under this).
 
-struct SurfaceLightPatch {
-	Vector3 pos;
+// One analytic polygonal light produced per merged coplanar island.
+struct SurfaceLightIslandLight {
+	Vector3 pos; // Island centroid, nudged off the face by the bake bias.
 	Vector3 normal;
-	float area = 0.0f;
+	float area = 0.0f; // True island (member-triangle) area.
 	Color color;
 	float energy = 0.0f;
-	// Merged coplanar-island index this patch was emitted from (all patches of one
-	// logical emitter face share it). The bake ignores it; the debug hook returns it
-	// so a visualizer can colour patches by island.
+	// Island index. The bake ignores it; the debug hook returns it so a
+	// visualizer can colour footprints by island.
 	int32_t component = -1;
-	// True when this patch sits in face-to-face contact with solid geometry (emits into
-	// solid). Computed per merged island (all patches of one face share it). The bake
-	// skips these at emission; the debug hook returns them with the flag set so the cull
-	// is visible in the visualizer.
+	// True when this island sits in face-to-face contact with solid geometry
+	// (emits into solid). The bake skips it at emission; the debug hook returns
+	// it with the flag set so the cull is visible in the visualizer.
 	bool occluded = false;
-	// Debug-only REAL footprint geometry: the world-space triangles (3*N verts) that
-	// actually compose this patch — its subdivide leaves, or the island/cell member
-	// triangles. These tile the emitter face with NO overlap. Filled only when the
-	// collector runs with geometry capture (the debug hook); the bake leaves it empty.
+	// The analytic polygon: flat v0,v1,v2 triangle triples, winding-normalized
+	// so cross(v1-v0, v2-v0) points along `normal`, each vertex nudged off the
+	// face by the bake bias. Hull fan for convex islands (exact), raw member
+	// triangles for non-convex under the cap, hull fan + radiance_scale past it.
+	PackedVector3Array poly_verts;
+	// Furthest poly vertex from the centroid; the range cull adds it so the
+	// centroid distance test is conservative for texels near a big island's edge.
+	float bounding_radius = 0.0f;
+	// island_area / hull_area (< 1) when a non-convex island fell back to its
+	// hull fan past the tri cap — conserves emitted power over the larger hull.
+	float radiance_scale = 1.0f;
+	// Debug-only REAL footprint geometry (pre-bias): the world-space triangles
+	// (3*N verts) this light integrates. Filled only when the collector runs
+	// with geometry capture (the debug hook); the bake leaves it empty.
 	PackedVector3Array dbg_verts;
 };
 
@@ -1151,15 +1153,6 @@ struct SurfaceLightIsland {
 	Color color;
 	float energy = 0.0f;
 	LocalVector<SurfaceLightTri> tris;
-};
-
-struct SurfaceLightCellAccum {
-	Vector3 pos_sum; // Area-weighted centroid accumulator.
-	float area = 0.0f;
-	// Member tri indices (into the island's tris) that fell in this cell — populated
-	// only for debug geometry capture, so the cell patch can return its real member
-	// triangles. Empty for the bake.
-	LocalVector<int32_t> tris;
 };
 
 // One solid (non-emitter, non-sky) world-space occluder triangle for the coplanar-contact
@@ -1260,67 +1253,14 @@ static bool _surface_light_test_occluded(const HashMap<Vector3i, LocalVector<int
 	return false;
 }
 
-// Longest-edge bisection: bounded aspect ratios on brush-face fans, halves the
-// area each step. Leaves are pushed as patches; a leaf still above the target
-// area (depth or per-surface cap hit) is emitted anyway so energy is conserved,
-// it just samples coarser (r_cap_hit reports it). p_face_normal is the surface's
-// vertex normal: it authoritatively points out of the emitting face, whereas the
-// cross product's sign depends on winding (Godot fronts wind clockwise), so the
-// cross is used for area only.
-static void _subdivide_surface_light_tri(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Vector3 &p_face_normal, int p_depth, const Color &p_color, float p_energy, float p_pos_bias, float p_target_area, int32_t p_component, bool p_capture_geometry, uint32_t p_surface_patch_base, Vector<SurfaceLightPatch> &r_patches, bool &r_cap_hit) {
-	const Vector3 cr = (p_b - p_a).cross(p_c - p_a);
-	const float area = 0.5f * cr.length();
-	if (area < SURFACE_LIGHT_MIN_PATCH_AREA) {
-		return;
-	}
-	const bool surface_capped = (uint32_t)r_patches.size() - p_surface_patch_base >= SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE;
-	if (area <= p_target_area || p_depth >= SURFACE_LIGHT_MAX_SUBDIV_DEPTH || surface_capped) {
-		if (area > p_target_area) {
-			r_cap_hit = true;
-		}
-		SurfaceLightPatch patch;
-		patch.normal = p_face_normal;
-		patch.pos = (p_a + p_b + p_c) / 3.0f + patch.normal * p_pos_bias;
-		patch.area = area;
-		patch.color = p_color;
-		patch.energy = p_energy;
-		patch.component = p_component;
-		// The leaf IS the patch's real footprint (bisection partitions the source
-		// triangle exactly, so leaves tile it with no overlap).
-		if (p_capture_geometry) {
-			patch.dbg_verts.push_back(p_a);
-			patch.dbg_verts.push_back(p_b);
-			patch.dbg_verts.push_back(p_c);
-		}
-		r_patches.push_back(patch);
-		return;
-	}
-	const float ab = (p_b - p_a).length_squared();
-	const float bc = (p_c - p_b).length_squared();
-	const float ca = (p_a - p_c).length_squared();
-	if (ab >= bc && ab >= ca) {
-		const Vector3 m = (p_a + p_b) * 0.5f;
-		_subdivide_surface_light_tri(p_a, m, p_c, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_target_area, p_component, p_capture_geometry, p_surface_patch_base, r_patches, r_cap_hit);
-		_subdivide_surface_light_tri(m, p_b, p_c, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_target_area, p_component, p_capture_geometry, p_surface_patch_base, r_patches, r_cap_hit);
-	} else if (bc >= ab && bc >= ca) {
-		const Vector3 m = (p_b + p_c) * 0.5f;
-		_subdivide_surface_light_tri(p_a, p_b, m, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_target_area, p_component, p_capture_geometry, p_surface_patch_base, r_patches, r_cap_hit);
-		_subdivide_surface_light_tri(p_a, m, p_c, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_target_area, p_component, p_capture_geometry, p_surface_patch_base, r_patches, r_cap_hit);
-	} else {
-		const Vector3 m = (p_c + p_a) * 0.5f;
-		_subdivide_surface_light_tri(p_a, p_b, m, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_target_area, p_component, p_capture_geometry, p_surface_patch_base, r_patches, r_cap_hit);
-		_subdivide_surface_light_tri(m, p_b, p_c, p_face_normal, p_depth + 1, p_color, p_energy, p_pos_bias, p_target_area, p_component, p_capture_geometry, p_surface_patch_base, r_patches, r_cap_hit);
-	}
-}
-
-// Shared surface-light patch generator: collect emitter triangles from the given
+// Shared surface-light island collector: gather emitter triangles from the given
 // meshes, merge coplanar islands (union-find over welded edges gated by exact
-// coplanarity), then subdivide each island to an ADAPTIVE target patch area (coarser
-// as the map's total emissive area grows, targeting SURFACE_LIGHT_TARGET_PATCHES;
-// never finer than SURFACE_LIGHT_PATCH_AREA). Frame-agnostic: patches come out in
-// whatever frame the input xforms are in. Used by both the bake prepare path and the
-// GDScript debug hook so the visualizer is exactly faithful to the bake.
-static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &p_inputs, float p_pos_bias, Vector<SurfaceLightPatch> &r_patches, bool p_capture_geometry = false) {
+// coplanarity), then extract each island's analytic polygon (convex hull fan when
+// exact, raw member triangles otherwise). One light per island. Frame-agnostic:
+// islands come out in whatever frame the input xforms are in. Used by both the
+// bake prepare path and the GDScript debug hook so the visualizer is exactly
+// faithful to the bake.
+static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &p_inputs, float p_pos_bias, Vector<SurfaceLightIslandLight> &r_islands, bool p_capture_geometry = false) {
 	// PHASE 1: gather emitter triangles per surface, merge into coplanar islands, and
 	// accumulate the map-wide emissive area (drives the adaptive tile size below). Solid
 	// (non-emitter, non-sky) triangles are indexed into a spatial hash in the same pass so
@@ -1382,7 +1322,7 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 					ot.v0 = in.xform.xform(vr[vidx[0]]);
 					ot.v1 = in.xform.xform(vr[vidx[1]]);
 					ot.v2 = in.xform.xform(vr[vidx[2]]);
-					if (0.5f * (ot.v1 - ot.v0).cross(ot.v2 - ot.v0).length() < SURFACE_LIGHT_MIN_PATCH_AREA) {
+					if (0.5f * (ot.v1 - ot.v0).cross(ot.v2 - ot.v0).length() < SURFACE_LIGHT_MIN_AREA) {
 						continue; // Degenerate sliver: no meaningful facing/coverage.
 					}
 					ot.normal = normal_xform.xform(nr[vidx[0]]).normalized();
@@ -1412,7 +1352,7 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 				tri.normal = normal_xform.xform(nr[vidx[0]]).normalized();
 				tri.area = 0.5f * (tri.v[1] - tri.v[0]).cross(tri.v[2] - tri.v[0]).length();
 				tri.centroid = (tri.v[0] + tri.v[1] + tri.v[2]) * (1.0f / 3.0f);
-				if (tri.area >= SURFACE_LIGHT_MIN_PATCH_AREA) {
+				if (tri.area >= SURFACE_LIGHT_MIN_AREA) {
 					tris.push_back(tri);
 				}
 			}
@@ -1479,149 +1419,130 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 		return;
 	}
 
-	// PHASE 2: adaptive effective patch area. Under budget this is exactly
-	// SURFACE_LIGHT_PATCH_AREA (byte-identical to the old fixed-tile behavior); above
-	// it, tiles coarsen so total patches track the budget. tile_cell = sqrt(area). The
-	// target is a project setting (see register_types.cpp), falling back to the
-	// SURFACE_LIGHT_TARGET_PATCHES constant if unset (e.g. a tool context where the
-	// lightmapper module didn't register it).
-	int target_patches = (int)GLOBAL_GET("rendering/lightmapping/bake_performance/surface_light_target_patches");
-	if (target_patches < 1) {
-		target_patches = (int)SURFACE_LIGHT_TARGET_PATCHES;
-	}
-	const float eff_area = MAX(SURFACE_LIGHT_PATCH_AREA, (float)(total_area / (double)target_patches));
-	// tile_cell = sqrt(eff_area); floored at SURFACE_LIGHT_TILE_CELL (= sqrt of the min
-	// patch area), so under budget it is exactly the old 2 m retile cell.
-	const float tile_cell = MAX(SURFACE_LIGHT_TILE_CELL, Math::sqrt(eff_area));
-	const float inv_cell = 1.0f / tile_cell;
+	// PHASE 2: one analytic polygon light per island. Convex islands (brush
+	// faces, however T-junction-fragmented) collapse to their in-plane convex
+	// hull fan — exact and minimal. Non-convex islands (coplanar-merged
+	// multi-brush faces) keep their raw member triangles under the per-island
+	// cap; past it they fall back to the hull fan with radiance scaled to
+	// conserve emitted power.
 	bool global_cap_warned = false;
-	uint32_t occluded_patches = 0; // Patches in face-to-face contact with solid (culled from the bake).
-
-	// Diagnostic (bake only; the debug hook may run per-frame so it stays quiet): shows
-	// whether the adaptive budget engaged and the effective tile area it used, so a
-	// crash-level patch count can be traced to emissive AREA vs island COUNT.
-	if (!p_capture_geometry) {
-		print_line(vformat("LightmapGI: surface-light collector — %d island(s), total emissive area %.1f m^2, target %d patches, eff patch area %.2f m^2 (adaptive budget %s; threshold %.0f m^2).",
-				(int)islands.size(), total_area, target_patches, eff_area,
-				(eff_area > SURFACE_LIGHT_PATCH_AREA ? "ENGAGED" : "off"),
-				(double)target_patches * (double)SURFACE_LIGHT_PATCH_AREA));
-	}
+	uint32_t occluded_islands = 0;
+	uint32_t hull_fallback_islands = 0;
+	uint32_t total_poly_verts = 0;
 
 	for (uint32_t ci = 0; ci < islands.size(); ci++) {
 		const SurfaceLightIsland &isl = islands[ci];
-		if (isl.area < SURFACE_LIGHT_MIN_PATCH_AREA) {
+		if (isl.area < SURFACE_LIGHT_MIN_AREA) {
 			continue;
 		}
-		if ((uint32_t)r_patches.size() >= SURFACE_LIGHT_MAX_PATCHES_TOTAL) {
+		if (total_poly_verts >= SURFACE_LIGHT_MAX_POLY_VERTS_TOTAL) {
 			if (!global_cap_warned) {
-				WARN_PRINT(vformat("LightmapGI: global surface-light patch cap (%d) reached; further emitter faces will not emit as area lights.", (int)SURFACE_LIGHT_MAX_PATCHES_TOTAL));
+				WARN_PRINT(vformat("LightmapGI: global surface-light polygon-vertex cap (%d) reached; further emitter faces will not emit as area lights. Raise SURFACE_LIGHT_MAX_POLY_VERTS_TOTAL if this map is legitimate.", (int)SURFACE_LIGHT_MAX_POLY_VERTS_TOTAL));
 				global_cap_warned = true;
 			}
 			break;
 		}
-		const uint32_t island_patch_base = (uint32_t)r_patches.size();
 		const Vector3 cnormal = isl.normal_sum.normalized();
 		const Vector3 island_centroid = isl.pos_sum / isl.area;
 
-		// Coplanar-contact occlusion: does this whole face sit pressed face-to-face
-		// against solid (its centroid in contact with an anti-parallel occluder)? If so
-		// every patch it produces emits into solid. Computed once per face (the reported
-		// waste is whole prism/side faces fully sandwiched, not partial overlap).
-		const bool island_occluded = _surface_light_test_occluded(occ_grid, occ_tris, island_centroid, cnormal);
+		SurfaceLightIslandLight light;
+		light.normal = cnormal;
+		light.pos = island_centroid + cnormal * p_pos_bias;
+		light.area = isl.area;
+		light.color = isl.color;
+		light.energy = isl.energy;
+		light.component = (int32_t)ci;
+		// Coplanar-contact occlusion: does this whole face sit pressed
+		// face-to-face against solid (its centroid in contact with an
+		// anti-parallel occluder)? If so it emits into solid. The bake skips
+		// it at emission; the debug hook keeps it, flagged.
+		light.occluded = _surface_light_test_occluded(occ_grid, occ_tris, island_centroid, cnormal);
 
-		if (isl.area <= eff_area) {
-			// Common case (a fixture, however fragmented, or any face under a tile): one patch.
-			SurfaceLightPatch patch;
-			patch.normal = cnormal;
-			patch.pos = island_centroid + cnormal * p_pos_bias;
-			patch.area = isl.area;
-			patch.color = isl.color;
-			patch.energy = isl.energy;
-			patch.component = (int32_t)ci;
-			// Real footprint = the island's own member triangles (they tile the face
-			// with no overlap).
-			if (p_capture_geometry) {
-				for (uint32_t m = 0; m < isl.tris.size(); m++) {
-					patch.dbg_verts.push_back(isl.tris[m].v[0]);
-					patch.dbg_verts.push_back(isl.tris[m].v[1]);
-					patch.dbg_verts.push_back(isl.tris[m].v[2]);
+		// In-plane convex hull over all member vertices. The island plane is
+		// the area-weighted mean plane through the centroid (members are
+		// coplanar to within SURFACE_LIGHT_COPLANAR_DOT, so reconstruction
+		// error is float-level slop, absorbed by the bias offset).
+		const Vector3 t_axis = (Math::abs(cnormal.y) < 0.777f ? Vector3(0, 1, 0) : Vector3(1, 0, 0)).cross(cnormal).normalized();
+		const Vector3 b_axis = cnormal.cross(t_axis);
+		Vector<Point2> pts2;
+		pts2.resize((int)isl.tris.size() * 3);
+		for (uint32_t m = 0; m < isl.tris.size(); m++) {
+			for (int k = 0; k < 3; k++) {
+				const Vector3 rel = isl.tris[m].v[k] - island_centroid;
+				pts2.write[(int)m * 3 + k] = Point2(rel.dot(t_axis), rel.dot(b_axis));
+			}
+		}
+		const Vector<Point2> hull = Geometry2D::convex_hull(pts2); // CCW; last == first.
+		const int hull_n = hull.size() - 1; // Unique hull vertices.
+		double hull_area = 0.0;
+		for (int h = 0; h < hull_n; h++) {
+			hull_area += 0.5 * (double)hull[h].cross(hull[h + 1]);
+		}
+		const bool convex_exact = hull_n >= 3 && hull_area <= (double)isl.area * (double)SURFACE_LIGHT_HULL_TOLERANCE;
+		const bool over_cap = isl.tris.size() > SURFACE_LIGHT_MAX_POLY_TRIS;
+
+		if ((convex_exact || over_cap) && hull_n >= 3) {
+			// Hull fan. Exact for convex islands; energy-conserving fallback
+			// (radiance spread over the larger hull) for non-convex over cap.
+			if (!convex_exact) {
+				light.radiance_scale = (float)((double)isl.area / MAX(hull_area, 1e-6));
+				hull_fallback_islands++;
+			}
+			// convex_hull output is CCW in the (t_axis, b_axis) frame, so fan
+			// triangles are already wound with their geometric normal along
+			// cnormal.
+			for (int h = 1; h < hull_n - 1; h++) {
+				const Point2 h2[3] = { hull[0], hull[h], hull[h + 1] };
+				for (int k = 0; k < 3; k++) {
+					const Vector3 v3 = island_centroid + t_axis * h2[k].x + b_axis * h2[k].y;
+					light.poly_verts.push_back(v3 + cnormal * p_pos_bias);
+					if (p_capture_geometry) {
+						light.dbg_verts.push_back(v3);
+					}
 				}
 			}
-			r_patches.push_back(patch);
 		} else {
-			// Genuinely large emitting face: tile into ~eff_area patches for correct local
-			// falloff. Safe because the island is connected + coplanar. Sub-tile members
-			// fuse per cell; a member already >= eff_area is bisected by the splitter.
-			HashMap<Vector3i, SurfaceLightCellAccum> cells;
-			bool cap_hit = false;
+			// Raw member triangles (exact for non-convex under the cap; also
+			// the degenerate-hull fallback). Winding-normalize each against
+			// the island normal — the cross product's sign depends on source
+			// winding (Godot fronts wind clockwise) and only the vertex
+			// normal is authoritative.
 			for (uint32_t m = 0; m < isl.tris.size(); m++) {
 				const SurfaceLightTri &tri = isl.tris[m];
-				if (tri.area >= eff_area) {
-					_subdivide_surface_light_tri(tri.v[0], tri.v[1], tri.v[2], cnormal, 0, isl.color, isl.energy, p_pos_bias, eff_area, (int32_t)ci, p_capture_geometry, island_patch_base, r_patches, cap_hit);
-				} else {
-					const Vector3i cell((int32_t)Math::floor(tri.centroid.x * inv_cell), (int32_t)Math::floor(tri.centroid.y * inv_cell), (int32_t)Math::floor(tri.centroid.z * inv_cell));
-					SurfaceLightCellAccum &acc = cells[cell];
-					acc.pos_sum += tri.centroid * tri.area;
-					acc.area += tri.area;
-					// Remember which member tris fell in this cell so the cell patch can
-					// return its real footprint geometry (debug only).
-					if (p_capture_geometry) {
-						acc.tris.push_back((int32_t)m);
-					}
-				}
-			}
-			for (const KeyValue<Vector3i, SurfaceLightCellAccum> &E : cells) {
-				if (E.value.area < SURFACE_LIGHT_MIN_PATCH_AREA) {
+				if (tri.area < SURFACE_LIGHT_MIN_AREA) {
 					continue;
 				}
-				if ((uint32_t)r_patches.size() >= SURFACE_LIGHT_MAX_PATCHES_TOTAL) {
-					if (!global_cap_warned) {
-						WARN_PRINT(vformat("LightmapGI: global surface-light patch cap (%d) reached; further emitter faces will not emit as area lights.", (int)SURFACE_LIGHT_MAX_PATCHES_TOTAL));
-						global_cap_warned = true;
-					}
-					break;
-				}
-				// Per-island backstop (pathological single face); the adaptive budget above
-				// normally keeps counts far below this.
-				if ((uint32_t)r_patches.size() - island_patch_base >= SURFACE_LIGHT_MAX_PATCHES_PER_SURFACE) {
-					break;
-				}
-				SurfaceLightPatch patch;
-				patch.normal = cnormal;
-				patch.pos = E.value.pos_sum / E.value.area + cnormal * p_pos_bias;
-				patch.area = E.value.area;
-				patch.color = isl.color;
-				patch.energy = isl.energy;
-				patch.component = (int32_t)ci;
-				// Real footprint = the member tris that fell in this cell.
-				if (p_capture_geometry) {
-					for (uint32_t ti = 0; ti < E.value.tris.size(); ti++) {
-						const SurfaceLightTri &mt = isl.tris[E.value.tris[ti]];
-						patch.dbg_verts.push_back(mt.v[0]);
-						patch.dbg_verts.push_back(mt.v[1]);
-						patch.dbg_verts.push_back(mt.v[2]);
+				const bool flip = (tri.v[1] - tri.v[0]).cross(tri.v[2] - tri.v[0]).dot(cnormal) < 0.0f;
+				const Vector3 tv[3] = { tri.v[0], flip ? tri.v[2] : tri.v[1], flip ? tri.v[1] : tri.v[2] };
+				for (int k = 0; k < 3; k++) {
+					light.poly_verts.push_back(tv[k] + cnormal * p_pos_bias);
+					if (p_capture_geometry) {
+						light.dbg_verts.push_back(tv[k]);
 					}
 				}
-				r_patches.push_back(patch);
 			}
 		}
 
-		// Stamp occlusion on every patch this island produced (uniform for both paths).
-		// The bake skips these at emission; the debug hook keeps them, flagged.
-		if (island_occluded) {
-			for (uint32_t k = island_patch_base; k < (uint32_t)r_patches.size(); k++) {
-				r_patches.write[k].occluded = true;
-			}
-			occluded_patches += (uint32_t)r_patches.size() - island_patch_base;
+		if (light.poly_verts.is_empty()) {
+			continue;
 		}
+		for (int k = 0; k < light.poly_verts.size(); k++) {
+			light.bounding_radius = MAX(light.bounding_radius, light.pos.distance_to(light.poly_verts[k]));
+		}
+		total_poly_verts += (uint32_t)light.poly_verts.size();
+		if (light.occluded) {
+			occluded_islands++;
+		}
+		r_islands.push_back(light);
 	}
 
-	// Cull report (bake only; the debug hook keeps occluded patches, flagged, and may run
-	// per-frame so it stays quiet). N of M patches sit in face-to-face contact with solid
-	// and are skipped at emission — pure waste removed from the O(texels x lights) pass.
-	if (!p_capture_geometry && occluded_patches > 0) {
-		print_line(vformat("LightmapGI: surface-light — culled %d occluded patch(es) of %d (face-to-face contact with solid).",
-				(int)occluded_patches, (int)r_patches.size()));
+	// Diagnostics (bake only; the debug hook may run per-frame so it stays quiet).
+	if (!p_capture_geometry) {
+		print_line(vformat("LightmapGI: surface-light collector — %d island light(s), total emissive area %.1f m^2, %d polygon vert(s), %d hull-fallback island(s), %d occluded island(s) culled.",
+				(int)r_islands.size(), total_area, (int)total_poly_verts, (int)hull_fallback_islands, (int)occluded_islands));
+		if (hull_fallback_islands > 0) {
+			WARN_PRINT(vformat("LightmapGI: %d non-convex emitter island(s) exceeded %d triangles and fell back to their convex hull (energy-conserving but geometrically smeared). Raise SURFACE_LIGHT_MAX_POLY_TRIS if this matters on this map.", (int)hull_fallback_islands, (int)SURFACE_LIGHT_MAX_POLY_TRIS));
+		}
 	}
 }
 // </ELIM>
@@ -1655,12 +1576,10 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 	Vector<Lightmapper::MeshData> mesh_data;
 	Vector<LightsFound> lights_found;
 	Vector<Vector3> probes_found;
-	// <ELIM> Area patches generated after the mesh loop by _collect_surface_light_patches
+	// <ELIM> Island lights generated after the mesh loop by _collect_surface_light_patches
 	// (shared with the debug hook); flushed to the lightmapper alongside the punctual lights.
-	// was: a `bool surface_light_global_cap_warned = false;` sat here to de-dup the
-	// per-map cap warning during inline emission — that state now lives inside
-	// _collect_surface_light_patches. (Fork-only decl; no upstream line touched.)
-	Vector<SurfaceLightPatch> surface_light_patches;
+	// (Fork-only decl; no upstream line touched.)
+	Vector<SurfaceLightIslandLight> surface_light_islands;
 	// </ELIM>
 	AABB bounds;
 	{
@@ -1906,7 +1825,7 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 				sl_inputs.write[mfi].xform = meshes_found[mfi].xform;
 				sl_inputs.write[mfi].overrides = meshes_found[mfi].overrides;
 			}
-			_collect_surface_light_patches(sl_inputs, MAX(0.01f, bias), surface_light_patches);
+			_collect_surface_light_patches(sl_inputs, MAX(0.01f, bias), surface_light_islands);
 		}
 		// </ELIM>
 	}
@@ -2047,37 +1966,35 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 			lightmapper->add_probe(probes_found[i]);
 		}
 
-		// <ELIM> Surface-light patches: each becomes an AREA_PATCH light. The
-		// range solves the peak unshadowed contribution E·A/(d²+A) = CUTOFF for
-		// d, so out-of-range patches early-out before any shadow rays. Patches flagged
-		// occluded (face-to-face contact with solid) emit into solid and are skipped —
-		// they never become area lights, sparing the direct pass their shadow-ray cost.
-		int emitted_patches = 0;
-		for (int i = 0; i < surface_light_patches.size(); i++) {
-			const SurfaceLightPatch &sp = surface_light_patches[i];
-			if (sp.occluded) {
+		// <ELIM> Surface-light islands: each becomes ONE analytic AREA_POLY
+		// light carrying its polygon. The range solves the peak unshadowed
+		// contribution E·A/d² = CUTOFF for d, plus the island bounding radius
+		// so the centroid distance test is conservative for texels near a big
+		// island's edge. Islands flagged occluded (face-to-face contact with
+		// solid) emit into solid and are skipped.
+		int emitted_islands = 0;
+		for (int i = 0; i < surface_light_islands.size(); i++) {
+			const SurfaceLightIslandLight &sl = surface_light_islands[i];
+			if (sl.occluded) {
 				continue;
 			}
-			const float e_eff = sp.energy * SURFACE_LIGHT_ENERGY_SCALE;
-			const float peak = e_eff * MAX(sp.color.r, MAX(sp.color.g, sp.color.b));
-			// Hard ceiling keeps range bounded even at max emitter energy (the
-			// 256-energy slider max) or an oversized coarsened patch — see the
-			// SURFACE_LIGHT_CUTOFF comment for why an unbounded range is unsafe.
-			const float range = CLAMP(Math::sqrt(MAX(0.0f, peak * sp.area / SURFACE_LIGHT_CUTOFF - sp.area)), 1.0f, 40.0f);
-			lightmapper->add_area_patch_light(vformat("surface_light_patch_%d", i), true, sp.pos, sp.normal, sp.color, e_eff, 1.0f, sp.area, range);
-			emitted_patches++;
+			const float e_eff = sl.energy * SURFACE_LIGHT_ENERGY_SCALE * sl.radiance_scale;
+			const float peak = e_eff * MAX(sl.color.r, MAX(sl.color.g, sl.color.b));
+			const float range = CLAMP(Math::sqrt(MAX(0.0f, peak * sl.area / SURFACE_LIGHT_CUTOFF)), 1.0f, SURFACE_LIGHT_RANGE_MAX) + sl.bounding_radius;
+			lightmapper->add_area_poly_light(vformat("surface_light_island_%d", i), true, sl.pos, sl.normal, sl.color, e_eff, 1.0f, sl.area, range, sl.poly_verts);
+			emitted_islands++;
 		}
-		if (emitted_patches > 0) {
-			print_verbose(vformat("LightmapGI: added %d surface-light area patches.", emitted_patches));
+		if (emitted_islands > 0) {
+			print_verbose(vformat("LightmapGI: added %d analytic surface-light island(s).", emitted_islands));
 		}
 		// Diagnostic for GPU-TDR/device-removed bake failures: the direct-light
 		// pass loops every light for every texel with no spatial acceleration, so
-		// total light count (punctual + area-patch) is the primary driver of a
+		// total light count (punctual + island) is the primary driver of a
 		// single dispatch's cost. Always-visible (not gated behind print_verbose)
 		// since this is the first thing to check when a bake hangs/crashes. Counts
-		// EMITTED patches (post occlusion cull), i.e. the real per-texel light load.
-		print_line(vformat("LightmapGI: baking with %d total light(s) (%d punctual, %d surface-light area patches).",
-				(int)lights_found.size() + emitted_patches, (int)lights_found.size(), emitted_patches));
+		// EMITTED islands (post occlusion cull), i.e. the real per-texel light load.
+		print_line(vformat("LightmapGI: baking with %d total light(s) (%d punctual, %d surface-light island(s)).",
+				(int)lights_found.size() + emitted_islands, (int)lights_found.size(), emitted_islands));
 		// </ELIM>
 	}
 
@@ -2515,16 +2432,17 @@ TypedArray<Dictionary> LightmapGI::debug_get_surface_light_patches(Node *p_from_
 		sl_inputs.write[mfi].overrides = meshes_found[mfi].overrides;
 	}
 
-	Vector<SurfaceLightPatch> patches;
+	Vector<SurfaceLightIslandLight> patches;
 	_collect_surface_light_patches(sl_inputs, MAX(0.01f, bias), patches, true /* capture real geometry */);
 
 	// One dict PER REAL FOOTPRINT TRIANGLE (each patch carries the world-space tris that
-	// actually compose it — subdivide leaves or island/cell member tris — which tile the
-	// emitter face with no overlap). Keeping exactly 3 verts per dict means the UI draw
-	// loop (3 edges per triple) is unchanged; normal/area/component/occluded are the owning
-	// patch's, so all tris of one patch share them (colour by component, grey if occluded).
+	// actually compose it — the island's analytic triangles: hull fan or member
+	// tris). Keeping exactly 3 verts per dict means the UI draw loop (3 edges per
+	// triple) is unchanged; normal/area/component/occluded are the owning
+	// island's, so all tris of one island share them (colour by component, grey
+	// if occluded).
 	for (int i = 0; i < patches.size(); i++) {
-		const SurfaceLightPatch &sp = patches[i];
+		const SurfaceLightIslandLight &sp = patches[i];
 		const PackedVector3Array &fv = sp.dbg_verts;
 		const int tri_count = fv.size() / 3;
 		for (int t = 0; t < tri_count; t++) {

@@ -204,7 +204,7 @@ class LightmapperRD : public Lightmapper {
 	static constexpr uint32_t SURFACE_FLAG_SKY = 1u;
 	static constexpr uint32_t SURFACE_FLAG_TRACE_ONLY = 2u;
 	// Bit 2 = surface light: its emission is integrated analytically as
-	// LIGHT_TYPE_AREA_PATCH lights, so the bounce pass must not also add its
+	// LIGHT_TYPE_AREA_POLY lights, so the bounce pass must not also add its
 	// rasterized emission (double count).
 	static constexpr uint32_t SURFACE_FLAG_SURFACE_LIGHT = 4u;
 	// </ELIM>
@@ -234,6 +234,11 @@ class LightmapperRD : public Lightmapper {
 
 	Vector<Light> lights;
 	Vector<LightMetadata> light_metadata;
+	// <ELIM> Flat vec4 stream backing the PolyVerts SSBO (binding 13): triangle
+	// vertex triples for analytic surface-light island polygons. See
+	// lm_common_inc.glsl for the layout contract (bias-offset xyz, CDF in w).
+	LocalVector<float> poly_verts_data;
+	// </ELIM>
 
 	struct TriangleSort {
 		uint32_t cell_index = 0;
@@ -290,12 +295,15 @@ class LightmapperRD : public Lightmapper {
 		uint32_t region_ofs[2] = {};
 		uint32_t probe_count = 0;
 		uint32_t denoiser_range = 0;
-		// <ELIM> Pad to a 16-byte multiple. Adding light_from/light_to (TDR guard)
-		// grew this struct 32->40; Vulkan/RD rounds the shader's push-constant range
-		// up to a 16-byte multiple (48), so the supplied sizeof() must match or
+		// <ELIM> Adding light_from/light_to (TDR guard) grew this struct 32->40;
+		// Vulkan/RD rounds the shader's push-constant range up to a 16-byte
+		// multiple (48), so the supplied sizeof() must match or
 		// compute_list_set_push_constant rejects it ("requires 48, supplied 40").
-		// Mirrors RasterSeamsPushConstant's trailing pad[2].
-		uint32_t pad[2] = {};
+		// The first padding slot now carries the surface-light visibility ray
+		// count (analytic area-poly lights); pad0 keeps the 48-byte size.
+		// Field order/offsets must match the push_constant block in lm_compute.glsl.
+		uint32_t surface_light_vis_rays = 16;
+		uint32_t pad0 = 0;
 		// </ELIM>
 	};
 
@@ -321,7 +329,7 @@ class LightmapperRD : public Lightmapper {
 	};
 
 	BakeError _blit_meshes_into_atlas(int p_max_texture_size, int p_denoiser_range, Vector<Ref<Image>> &albedo_images, Vector<Ref<Image>> &emission_images, AABB &bounds, Size2i &atlas_size, int &atlas_slices, float p_supersampling_factor, BakeStepFunc p_step_function, void *p_bake_userdata);
-	void _create_acceleration_structures(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, AABB &bounds, int grid_size, uint32_t p_cluster_size, Vector<Probe> &probe_positions, GenerateProbes p_generate_probes, Vector<int> &slice_triangle_count, Vector<int> &slice_seam_count, RID &vertex_buffer, RID &triangle_buffer, RID &lights_buffer, RID &r_triangle_indices_buffer, RID &r_cluster_indices_buffer, RID &r_cluster_aabbs_buffer, RID &probe_positions_buffer, RID &grid_texture, RID &seams_buffer, BakeStepFunc p_step_function, void *p_bake_userdata);
+	void _create_acceleration_structures(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, AABB &bounds, int grid_size, uint32_t p_cluster_size, Vector<Probe> &probe_positions, GenerateProbes p_generate_probes, Vector<int> &slice_triangle_count, Vector<int> &slice_seam_count, RID &vertex_buffer, RID &triangle_buffer, RID &lights_buffer, RID &r_triangle_indices_buffer, RID &r_cluster_indices_buffer, RID &r_cluster_aabbs_buffer, RID &probe_positions_buffer, RID &grid_texture, RID &seams_buffer, RID &r_poly_verts_buffer, BakeStepFunc p_step_function, void *p_bake_userdata);
 	void _raster_geometry(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, int grid_size, AABB bounds, float p_bias, Vector<int> slice_triangle_count, RID position_tex, RID unocclude_tex, RID normal_tex, RID raster_depth_buffer, RID rasterize_shader, RID raster_base_uniform);
 
 	BakeError _dilate(RenderingDevice *rd, Ref<RDShaderFile> &compute_shader, RID &compute_base_uniform_set, PushConstant &push_constant, RID &source_light_tex, RID &dest_light_tex, const Size2i &atlas_size, int atlas_slices);
@@ -339,8 +347,8 @@ public:
 	virtual void add_directional_light(const String &p_name, bool p_static, const Vector3 &p_direction, const Color &p_color, float p_energy, float p_indirect_energy, float p_angular_distance, float p_shadow_blur) override;
 	virtual void add_omni_light(const String &p_name, bool p_static, const Vector3 &p_position, const Color &p_color, float p_energy, float p_indirect_energy, float p_range, float p_attenuation, float p_size, float p_shadow_blur) override;
 	virtual void add_spot_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 p_direction, const Color &p_color, float p_energy, float p_indirect_energy, float p_range, float p_attenuation, float p_spot_angle, float p_spot_attenuation, float p_size, float p_shadow_blur) override;
-	// <ELIM> surface-light sample patch (see Lightmapper::add_area_patch_light).
-	virtual void add_area_patch_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range) override;
+	// <ELIM> analytic polygonal surface light (see Lightmapper::add_area_poly_light).
+	virtual void add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts) override;
 	// </ELIM>
 	virtual void add_probe(const Vector3 &p_position) override;
 	virtual BakeError bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function = nullptr, void *p_bake_userdata = nullptr, float p_exposure_normalization = 1.0, float p_supersampling_factor = 1.0f) override;
