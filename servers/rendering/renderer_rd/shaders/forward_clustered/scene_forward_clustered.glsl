@@ -1669,6 +1669,14 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 indirect_specular_light = vec3(0.0, 0.0, 0.0);
 	vec3 diffuse_light = vec3(0.0, 0.0, 0.0);
 	vec3 ambient_light = vec3(0.0, 0.0, 0.0);
+	// <ELIM> Baked-map directional specular: how much baked light reaches this texel,
+	// 0 = none. Written by the Phase-2 lightmap-occlusion block below (USE_LIGHTMAP
+	// variants only) and consumed by the directional-light loop, where it both gates
+	// and shadows the specular-only contribution of statically baked lights. Staying
+	// 0 (unshaded, ambient disabled, no lightmap, or reference unset) means the loop
+	// keeps upstream behaviour and skips those lights entirely.
+	float lm_direct_spec_occ = 0.0;
+	// </ELIM>
 #ifndef MODE_UNSHADED
 	// Used in regular draw pass and when drawing SDFs for SDFGI and materials for VoxelGI.
 	emission *= scene_data.emissive_exposure_normalization;
@@ -1914,6 +1922,8 @@ void fragment_shader(in SceneData scene_data) {
 		float lm_occ = clamp(lm_luma / scene_data.reflection_lightmap_occlusion_reference, 0.0, 1.0);
 		lm_occ *= lm_occ;
 		indirect_specular_light *= lm_occ;
+		// Same factor drives baked-light direct specular in the directional loop.
+		lm_direct_spec_occ = lm_occ;
 	}
 	// </ELIM>
 
@@ -2340,9 +2350,26 @@ void fragment_shader(in SceneData scene_data) {
 					continue; //not masked
 				}
 
+				// <ELIM> Baked-map directional specular: the specular-only path in the
+				// shading loop needs a real per-light visibility term, so let this light
+				// through the shadow pass rather than skipping it outright - otherwise
+				// shadow0/shadow1 hold nothing for it and the highlight ignores geometry
+				// (sun specular straight through a roof). Vertex lighting keeps the
+				// upstream skip: its shadow application multiplies diffuse_light, which
+				// would wrongly dim other lights' baked contribution.
+				// if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+				// 	continue; // Statically baked light and object uses lightmap, skip
+				// }
 				if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+#ifdef USE_VERTEX_LIGHTING
 					continue; // Statically baked light and object uses lightmap, skip
+#else
+					if (lm_direct_spec_occ <= 0.0 || directional_lights.data[i].specular <= 0.0 || directional_lights.data[i].shadow_opacity <= 0.001) {
+						continue; // Statically baked light and object uses lightmap, skip
+					}
+#endif
 				}
+				// </ELIM>
 
 				float shadow = 1.0;
 
@@ -2582,9 +2609,39 @@ void fragment_shader(in SceneData scene_data) {
 				continue; //not masked
 			}
 
+			// <ELIM> Baked-map directional specular.
+			// Upstream skips a statically baked light on lightmapped geometry outright.
+			// The diffuse half of that skip is correct - the lightmap already holds it -
+			// but it also discards the specular, which is why baked maps read flat: no
+			// highlight ever moves with the viewer. Keep the diffuse skip (restored after
+			// light_compute below) and let the specular through.
+			//
+			// Occlusion comes from the light's own shadow map (the shadow pass above no
+			// longer skips this light), so a roof blocks the highlight the same way it
+			// blocks the light. lm_direct_spec_occ is kept only as a secondary multiplier
+			// on top of that - it defends the far field, where the cascade has faded to
+			// unshadowed and the bake is the only remaining evidence of enclosure.
+			//
+			// Requires real per-light visibility to exist at all: no shadow map (shadows
+			// disabled, or shadow_opacity 0 because the light casts none) means falling
+			// back to the upstream skip rather than guessing. Per-light opt-out is the
+			// existing DirectionalLight3D.light_specular (0 = upstream).
+			//
+			// if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+			// 	continue; // Statically baked light and object uses lightmap, skip
+			// }
+			bool lm_specular_only = false;
 			if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+#ifdef SHADOWS_DISABLED
 				continue; // Statically baked light and object uses lightmap, skip
+#else
+				if (lm_direct_spec_occ <= 0.0 || directional_lights.data[i].specular <= 0.0 || directional_lights.data[i].shadow_opacity <= 0.001) {
+					continue; // Statically baked light and object uses lightmap, skip
+				}
+				lm_specular_only = true;
+#endif
 			}
+			// </ELIM>
 
 #ifdef LIGHT_TRANSMITTANCE_USED
 			float transmittance_z = transmittance_depth;
@@ -2650,6 +2707,16 @@ void fragment_shader(in SceneData scene_data) {
 
 			blur_shadow(shadow);
 
+			// <ELIM> Baked-map directional specular: `shadow` is this light's real cascade
+			// value (the shadow pass no longer skips it), which is what stops the highlight
+			// passing through roofs. The baked factor multiplies on top - beyond
+			// directional_shadow_max_distance the cascade fades to unshadowed and the
+			// lightmap becomes the only evidence that a surface is enclosed.
+			if (lm_specular_only) {
+				shadow *= lm_direct_spec_occ;
+			}
+			// </ELIM>
+
 #ifdef DEBUG_DRAW_PSSM_SPLITS
 			vec3 tint = vec3(1.0);
 			if (-vertex.z < directional_lights.data[i].shadow_split_offsets.x) {
@@ -2667,6 +2734,11 @@ void fragment_shader(in SceneData scene_data) {
 
 			float size_A = sc_use_directional_soft_shadows() ? directional_lights.data[i].size : 0.0;
 
+			// <ELIM> Baked-map directional specular: light_compute writes diffuse and
+			// specular to separate accumulators, but only as out-params, so the cheapest
+			// way to keep one half is to snapshot the other and put it back afterwards.
+			vec3 lm_diffuse_before = diffuse_light;
+			// </ELIM>
 			light_compute(normal, directional_lights.data[i].direction, normalize(view), size_A,
 #ifndef DEBUG_DRAW_PSSM_SPLITS
 					directional_lights.data[i].color * directional_lights.data[i].energy,
@@ -2695,6 +2767,14 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 					diffuse_light,
 					direct_specular_light);
+
+			// <ELIM> Baked-map directional specular: discard the diffuse half - the
+			// lightmap already carries this light's diffuse contribution, and adding it
+			// again would double-light every baked surface.
+			if (lm_specular_only) {
+				diffuse_light = lm_diffuse_before;
+			}
+			// </ELIM>
 		}
 #endif // USE_VERTEX_LIGHTING
 	}
