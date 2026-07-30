@@ -119,13 +119,23 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	customization_configuration_hash = to_hash.as_string().hash64();
 
 	BitField<RenderingShaderLibrary::FeatureBits> renderer_features = {};
+	// <ELIM> FEATURE_ADVANCED_BIT was set inside the XR guard upstream, but it has
+	// nothing to do with XR: it gates SHADER_GROUP_ADVANCED, which owns every
+	// colour-pass variant carrying LIGHTMAP, SEPARATE_SPECULAR or MOTION_VECTORS
+	// (scene_shader_forward_clustered.cpp:673,677-678). With disable_xr=yes the
+	// group stayed disabled, so _customize_shader_version skipped it entirely
+	// (this file, the is_group_enabled check) and no lightmap variant was ever
+	// baked — leaving a multi-second first-lightmapped-frame compile in exports.
+	// Only the multiview flag is genuinely XR-conditional.
+	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_ADVANCED_BIT);
 #ifndef XR_DISABLED
 	bool xr_enabled = GLOBAL_GET("xr/shaders/enabled");
-	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_ADVANCED_BIT);
+	// renderer_features.set_flag(RenderingShaderLibrary::FEATURE_ADVANCED_BIT);
 	if (xr_enabled) {
 		renderer_features.set_flag(RenderingShaderLibrary::FEATURE_MULTIVIEW_BIT);
 	}
 #endif // XR_DISABLED
+	// </ELIM>
 
 	int vrs_mode = GLOBAL_GET("rendering/vrs/mode");
 	if (vrs_mode != 0) {
