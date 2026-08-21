@@ -19,6 +19,11 @@ layout(set = 0, binding = 0) uniform BakeParameters {
 	int shadowmask_light_idx;
 	uint transparency_rays;
 	float supersampling_factor;
+
+	// <ELIM> Bounce chroma boost. Scalar only — std140 pads the struct tail to the
+	// 16-byte multiple the C++ side spells out explicitly. 1.0 = upstream-identical.
+	float bounce_saturation;
+	// </ELIM>
 }
 bake_params;
 

@@ -580,7 +580,7 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 			//compute seams that will need to be blended later
 			// <ELIM> Trace-only meshes own no atlas texels, so there are no seams to
 			// blend (and their sentinel slice is out of slice_seam_count's range).
-			for (int k = 0; !mesh_trace_only && k < 3; k++) {
+			for (int k = 0; !mesh_trace_only && k < 3; k++) { // </ELIM>
 				int n = (k + 1) % 3;
 
 				Edge edge(vtxs[k], vtxs[n], normal[k], normal[n]);
@@ -1213,7 +1213,7 @@ LightmapperRD::BakeError LightmapperRD::_denoise(RenderingDevice *p_rd, Ref<RDSh
 	return BAKE_OK;
 }
 
-LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function, void *p_bake_userdata, float p_exposure_normalization, float p_supersampling_factor) {
+LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function, void *p_bake_userdata, float p_exposure_normalization, float p_supersampling_factor, /* <ELIM> */ float p_bounce_saturation /* </ELIM> */) {
 	int denoiser = GLOBAL_GET("rendering/lightmapping/denoising/denoiser");
 #ifdef TOOLS_ENABLED // <ELIM> OIDN setup is editor-only; runtime bakes force JNLM.
 	// EditorSettings only exists when the editor UI itself is running;
@@ -1468,6 +1468,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	rd->free_rid(seams_buffer);            \
 	rd->free_rid(probe_positions_buffer);  \
 	rd->free_rid(poly_verts_buffer);
+// </ELIM>
 
 	const uint32_t cluster_size = 16;
 	_create_acceleration_structures(rd, atlas_size, atlas_slices, bounds, grid_size, cluster_size, probe_positions, p_generate_probes, slice_triangle_count, slice_seam_count, vertex_buffer, triangle_buffer, lights_buffer, triangle_indices_buffer, cluster_indices_buffer, cluster_aabbs_buffer, probe_positions_buffer, grid_texture, seams_buffer, poly_verts_buffer, p_step_function, p_bake_userdata);
@@ -1526,6 +1527,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	bake_parameters.exposure_normalization = p_exposure_normalization;
 	bake_parameters.bounces = p_bounces;
 	bake_parameters.bounce_indirect_energy = p_bounce_indirect_energy;
+	// <ELIM> Bounce chroma boost.
+	bake_parameters.bounce_saturation = p_bounce_saturation;
+	// </ELIM>
 	bake_parameters.shadowmask_light_idx = shadowmask_light_idx;
 	// Same number of rays for transparency regardless of quality (it's more of a retry rather than shooting new ones).
 	bake_parameters.transparency_rays = GLOBAL_GET("rendering/lightmapping/bake_performance/max_transparency_rays");

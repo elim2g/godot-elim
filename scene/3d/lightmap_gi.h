@@ -191,6 +191,9 @@ private:
 	int denoiser_range = 10;
 	int bounces = 3;
 	float bounce_indirect_energy = 1.0;
+	// <ELIM> Bounce chroma boost. 1.0 = upstream-identical.
+	float bounce_saturation = 1.0;
+	// </ELIM>
 	float bias = 0.0005;
 	float texel_scale = 1.0;
 	int max_texture_size = 16384;
@@ -349,6 +352,10 @@ public:
 
 	void set_bounce_indirect_energy(float p_indirect_energy);
 	float get_bounce_indirect_energy() const;
+	// <ELIM> Bounce chroma boost.
+	void set_bounce_saturation(float p_saturation);
+	float get_bounce_saturation() const;
+	// </ELIM>
 
 	void set_bias(float p_bias);
 	float get_bias() const;

@@ -59,7 +59,24 @@ class LightmapperRD : public Lightmapper {
 		uint32_t shadowmask_light_idx = 0;
 		uint32_t transparency_rays = 0;
 		float supersampling_factor = 0.0f;
+
+		// <ELIM> Bounce chroma boost (q3map2 -bouncecolorratio analogue). APPENDED,
+		// never inserted, so every existing field offset stays put. This is a std140
+		// UBO: the struct must stay a 16-byte multiple, so the lone float carries 3
+		// pad floats on the C++ side (128 -> 144). GLSL declares ONLY the scalar and
+		// lets std140 pad the tail — a GLSL float[3] would be 48 bytes, not 12.
+		float bounce_saturation = 1.0f;
+		float pad_bounce_saturation[3] = {};
+		// </ELIM>
 	};
+
+	// <ELIM> BakeParameters is a std140 UBO shared with lm_common_inc.glsl. std140
+	// rounds the struct up to a 16-byte multiple, so a C++ size that is not a
+	// multiple of 16 desyncs every field the shader reads past the gap — and the
+	// headless dummy renderer cannot catch it. Fail the build instead.
+	static_assert(sizeof(BakeParameters) % 16 == 0,
+			"BakeParameters must stay a multiple of 16 bytes to match its std140 GLSL layout.");
+	// </ELIM>
 
 	struct MeshInstance {
 		MeshData data;
@@ -351,7 +368,7 @@ public:
 	virtual void add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts) override;
 	// </ELIM>
 	virtual void add_probe(const Vector3 &p_position) override;
-	virtual BakeError bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function = nullptr, void *p_bake_userdata = nullptr, float p_exposure_normalization = 1.0, float p_supersampling_factor = 1.0f) override;
+	virtual BakeError bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function = nullptr, void *p_bake_userdata = nullptr, float p_exposure_normalization = 1.0, float p_supersampling_factor = 1.0f, /* <ELIM> */ float p_bounce_saturation = 1.0f /* </ELIM> */) override;
 
 	int get_bake_texture_count() const override;
 	Ref<Image> get_bake_texture(int p_index) const override;

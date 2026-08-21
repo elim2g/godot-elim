@@ -1066,7 +1066,26 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 			}
 			// </ELIM>
 			throughput = mix(throughput, throughput * albedo_alpha.rgb, albedo_alpha.a);
-			light += throughput * direct_light * bake_params.bounce_indirect_energy * albedo_alpha.a;
+			// <ELIM> Bounce chroma boost (q3map2 -bouncecolorratio analogue). Applied to
+			// the indirect CONTRIBUTION rather than to albedo, so it amplifies chroma from
+			// BOTH the bouncing surface's colour and the source light's colour (an orange
+			// emitter spilling onto a grey wall carries its orange in direct_light, not in
+			// albedo — saturating albedo alone would not touch it).
+			//
+			// mix() toward the contribution's own luminance is luminance-PRESERVING for any
+			// s: lum(mix(vec3(l), c, s)) == l, since lum(vec3(l)) == l. So this changes only
+			// how colourful indirect is, never how bright the bake is. s = 1.0 is
+			// bit-identical to upstream. Clamped to [0,1] of the original luminance scale:
+			// s > 1 drives the weak channels negative, and a negative radiance would
+			// subtract light on the next bounce.
+			// light += throughput * direct_light * bake_params.bounce_indirect_energy * albedo_alpha.a;
+			vec3 indirect = throughput * direct_light;
+			if (bake_params.bounce_saturation != 1.0) {
+				float indirect_lum = dot(indirect, vec3(0.2126, 0.7152, 0.0722));
+				indirect = max(vec3(0.0), mix(vec3(indirect_lum), indirect, bake_params.bounce_saturation));
+			}
+			light += indirect * bake_params.bounce_indirect_energy * albedo_alpha.a;
+			// </ELIM>
 
 			if (albedo_alpha.a < 1.0) {
 				transparency_rays_left -= 1;

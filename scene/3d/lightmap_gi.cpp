@@ -1023,6 +1023,13 @@ static constexpr float SURFACE_LIGHT_ENERGY_SCALE = 1.0f / (float)Math::PI;
 // far.
 static constexpr float SURFACE_LIGHT_CUTOFF = 0.005f;
 static constexpr float SURFACE_LIGHT_RANGE_MAX = 512.0f;
+// <ELIM> Coplanar-contact occlusion is an AREA fraction over an island's member
+// triangles, not a single centroid probe (see the cull site). Only an island that
+// is essentially fully pressed against solid is dropped. The sample cap bounds the
+// grid queries on very large islands; islands are far below it in practice.
+static constexpr float SURFACE_LIGHT_OCC_CULL_FRACTION = 0.98f;
+static constexpr uint32_t SURFACE_LIGHT_OCC_MAX_SAMPLES = 256u;
+// </ELIM>
 // Connectivity + coplanarity merge. The importer's vertex-weld / T-junction pass
 // re-triangulates one logical flat emissive brush face into dozens–hundreds of
 // tiny slivers (needed to seal see-through seam cracks against neighbouring
@@ -1452,11 +1459,30 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 		light.color = isl.color;
 		light.energy = isl.energy;
 		light.component = (int32_t)ci;
-		// Coplanar-contact occlusion: does this whole face sit pressed
-		// face-to-face against solid (its centroid in contact with an
-		// anti-parallel occluder)? If so it emits into solid. The bake skips
-		// it at emission; the debug hook keeps it, flagged.
-		light.occluded = _surface_light_test_occluded(occ_grid, occ_tris, island_centroid, cnormal);
+		// <ELIM> Occluded = the fraction of the island's AREA pressed face-to-face
+		// against solid, not a single centroid probe. v1 tested one point per PATCH
+		// (dozens per island), so a point sample was a local decision. v2 emits ONE
+		// light per island, so the same test let a single buried sample cull a
+		// map-spanning emitter: a lava pool with any brush standing in it went
+		// completely dark while a neighbouring pool of the same texture lit fine.
+		// Cull only when the island is essentially fully buried.
+		// light.occluded = _surface_light_test_occluded(occ_grid, occ_tris, island_centroid, cnormal);
+		{
+			const uint32_t occ_tri_count = isl.tris.size();
+			const uint32_t occ_stride = MAX(1u, occ_tri_count / SURFACE_LIGHT_OCC_MAX_SAMPLES);
+			float occ_area = 0.0f;
+			float occ_tested_area = 0.0f;
+			for (uint32_t m = 0; m < occ_tri_count; m += occ_stride) {
+				const SurfaceLightTri &occ_tri = isl.tris[m];
+				const Vector3 occ_c = (occ_tri.v[0] + occ_tri.v[1] + occ_tri.v[2]) / 3.0f;
+				occ_tested_area += occ_tri.area;
+				if (_surface_light_test_occluded(occ_grid, occ_tris, occ_c, cnormal)) {
+					occ_area += occ_tri.area;
+				}
+			}
+			light.occluded = occ_tested_area > 0.0f && (occ_area / occ_tested_area) >= SURFACE_LIGHT_OCC_CULL_FRACTION;
+		}
+		// </ELIM>
 
 		// In-plane convex hull over all member vertices. The island plane is
 		// the area-weighted mean plane through the centroid (members are
@@ -2078,7 +2104,8 @@ void LightmapGI::_bake_gpu_internal(BakeState &p_state, Lightmapper::BakeStepFun
 
 	p_state.gpu_err = p_state.lightmapper->bake(Lightmapper::BakeQuality(bake_quality), use_denoiser, denoiser_strength, denoiser_range, bounces,
 			bounce_indirect_energy, bias, max_texture_size, directional, shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE, use_texture_for_bounces,
-			Lightmapper::GenerateProbes(gen_probes), p_state.environment_image, p_state.environment_transform, _lightmap_bake_step_function, &bsud, p_state.exposure_normalization, (supersampling_enabled ? supersampling_factor : 1));
+			Lightmapper::GenerateProbes(gen_probes), p_state.environment_image, p_state.environment_transform, _lightmap_bake_step_function, &bsud, p_state.exposure_normalization, (supersampling_enabled ? supersampling_factor : 1),
+			/* <ELIM> */ bounce_saturation /* </ELIM> */);
 }
 
 // PHASE 3 (MAIN THREAD): everything that touches the global RS or the scene
@@ -2699,6 +2726,16 @@ float LightmapGI::get_bounce_indirect_energy() const {
 	return bounce_indirect_energy;
 }
 
+// <ELIM> Bounce chroma boost. Negative saturation would invert hues; clamp at 0.
+void LightmapGI::set_bounce_saturation(float p_saturation) {
+	bounce_saturation = MAX(0.0f, p_saturation);
+}
+
+float LightmapGI::get_bounce_saturation() const {
+	return bounce_saturation;
+}
+// </ELIM>
+
 void LightmapGI::set_bias(float p_bias) {
 	ERR_FAIL_COND(p_bias < 0.00001);
 	bias = p_bias;
@@ -2821,6 +2858,10 @@ void LightmapGI::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_bounce_indirect_energy", "bounce_indirect_energy"), &LightmapGI::set_bounce_indirect_energy);
 	ClassDB::bind_method(D_METHOD("get_bounce_indirect_energy"), &LightmapGI::get_bounce_indirect_energy);
+	// <ELIM> Bounce chroma boost.
+	ClassDB::bind_method(D_METHOD("set_bounce_saturation", "bounce_saturation"), &LightmapGI::set_bounce_saturation);
+	ClassDB::bind_method(D_METHOD("get_bounce_saturation"), &LightmapGI::get_bounce_saturation);
+	// </ELIM>
 
 	ClassDB::bind_method(D_METHOD("set_generate_probes", "subdivision"), &LightmapGI::set_generate_probes);
 	ClassDB::bind_method(D_METHOD("get_generate_probes"), &LightmapGI::get_generate_probes);
@@ -2894,6 +2935,9 @@ void LightmapGI::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "supersampling_factor", PROPERTY_HINT_RANGE, "1,8,1"), "set_supersampling_factor", "get_supersampling_factor");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "bounces", PROPERTY_HINT_RANGE, "0,6,1,or_greater"), "set_bounces", "get_bounces");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "bounce_indirect_energy", PROPERTY_HINT_RANGE, "0,2,0.01"), "set_bounce_indirect_energy", "get_bounce_indirect_energy");
+	// <ELIM> Bounce chroma boost.
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "bounce_saturation", PROPERTY_HINT_RANGE, "0,8,0.01"), "set_bounce_saturation", "get_bounce_saturation");
+	// </ELIM>
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "directional"), "set_directional", "is_directional");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadowmask_mode", PROPERTY_HINT_ENUM, "None,Replace,Overlay"), "set_shadowmask_mode", "get_shadowmask_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_texture_for_bounces"), "set_use_texture_for_bounces", "is_using_texture_for_bounces");
