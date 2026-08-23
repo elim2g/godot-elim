@@ -158,8 +158,9 @@ cluster_aabbs;
 // <ELIM> Surface-light island polygons: triples of vec4 forming triangles.
 // xyz = world-space vertex, pre-offset by the bake bias along the island
 // normal, winding normalized CPU-side so cross(v1-v0, v2-v0) points along the
-// island normal. w of each triangle's FIRST vertex = normalized area CDF after
-// that triangle (for area-weighted visibility sampling); w = 0 elsewhere.
+// island normal. w is unused padding: visibility sampling used to walk an area
+// CDF stored there, but rays are now handed out by each triangle's analytic
+// contribution to the RECEIVING TEXEL, which no CPU-side table can express.
 layout(set = 0, binding = 13, std430) restrict readonly buffer PolyVerts {
 	vec4 data[];
 }

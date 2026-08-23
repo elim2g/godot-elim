@@ -993,14 +993,21 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 // geometry — integrated in the direct pass with exact edge-sum irradiance and
 // ray-estimated visibility (no centroid discretization, no Monte Carlo blotch).
 static constexpr float SURFACE_LIGHT_MIN_AREA = 1e-4f; // Degenerate-sliver island cull.
-// Per-island triangle cap. Convex islands (the overwhelming common case —
-// brush faces are convex, however T-junction-fragmented) collapse to a convex
-// hull fan of a handful of triangles, far below this. A NON-convex island
-// (coplanar-merged multi-brush face) keeps its raw member triangles only up to
-// this cap; past it, the island falls back to its hull fan with emitted
-// radiance scaled by island_area/hull_area (energy-conserving, geometrically
-// smeared over the hull — logged, and rare enough to accept).
-static constexpr uint32_t SURFACE_LIGHT_MAX_POLY_TRIS = 64;
+// Per-island triangle cap, applied to the island's SIMPLIFIED polygon (see
+// _surface_light_simplify_island) — not to the importer's raw fragment count.
+// Convex islands collapse to a hull fan of a handful of triangles; a non-convex
+// island is rebuilt from its boundary, which strips the T-junction slivers that
+// used to dominate the count. Past the cap an island still falls back to its
+// hull fan with radiance scaled by island_area/hull_area: power-conserving but
+// geometrically smeared, which for a concave emitter means light leaking onto
+// geometry that is not emissive AND the real emitter dimmed by the same ratio.
+// That fallback is a last resort for a pathological island, never the routine
+// outcome, so the cap sits far above any real face: the analytic edge sum is a
+// few dozen flops per triangle, and the direct pass already charges each area
+// light a full soft-shadow ray budget it does not spend (it fires
+// surface_light_visibility_rays, typically 16), plus an explicit per-triangle
+// term in the batcher's cost model.
+static constexpr uint32_t SURFACE_LIGHT_MAX_POLY_TRIS = 1024;
 // Global polygon-vertex backstop against a pathological/misconfigured map
 // (e.g. a texture accidentally flagged emissive across the whole level)
 // exhausting VRAM. Past it, further emitter islands are dropped entirely (a
@@ -1260,6 +1267,345 @@ static bool _surface_light_test_occluded(const HashMap<Vector3i, LocalVector<int
 	return false;
 }
 
+// <ELIM> Island polygon simplification: boundary extraction + retriangulation.
+//
+// The importer's weld / T-junction pass shatters one logical flat emissive face
+// into dozens-to-hundreds of slivers (needed to seal see-through seam cracks —
+// see surface_gatherer.cpp). Those slivers are the island's INTERIOR
+// tessellation, not its shape: every interior edge is shared by two members and
+// contributes nothing, so the island is fully described by its boundary loops.
+// Extracting that boundary, dropping the collinear T-junction vertices strung
+// along it, and re-triangulating reproduces the island EXACTLY with a handful of
+// triangles. That is what makes the triangle cap stop binding: a concave
+// (coplanar-merged multi-brush) emitter no longer has to choose between hundreds
+// of shader triangles and a convex hull that smears its light over geometry that
+// is not emissive at all.
+//
+// Every step is exact or bails. Non-manifold winding, unclosed loops, more than
+// one outer loop, un-bridgeable holes, and any area mismatch against the member
+// triangles all return false, and the caller keeps its existing behaviour rather
+// than emitting geometry that is merely plausible.
+static constexpr float SURFACE_LIGHT_COLLINEAR_EPS = 1e-3f; // m; boundary deviation treated as collinear (matches the weld grid).
+static constexpr uint64_t SURFACE_LIGHT_BRIDGE_WORK_LIMIT = 4000000; // Hole-bridge search product guard; simplified loops are orders of magnitude under.
+static constexpr uint32_t SURFACE_LIGHT_MAX_BOUNDARY_VERTS = 512; // Ear-clip input bound; a simplified contour is a face's real corner count.
+
+// Quantized 2D vertex key for boundary extraction, at the same weld granularity
+// as the 3D edge matching that built the island.
+struct SurfaceLightVert2Key {
+	int32_t x;
+	int32_t y;
+	bool operator==(const SurfaceLightVert2Key &p_o) const { return x == p_o.x && y == p_o.y; }
+};
+
+struct SurfaceLightVert2KeyHasher {
+	static uint32_t hash(const SurfaceLightVert2Key &p_k) {
+		uint32_t h = hash_murmur3_one_32((uint32_t)p_k.x);
+		h = hash_murmur3_one_32((uint32_t)p_k.y, h);
+		return hash_fmix32(h);
+	}
+};
+
+static double _surface_light_loop_area(const LocalVector<Vector2> &p_loop) {
+	double a = 0.0;
+	const uint32_t n = p_loop.size();
+	for (uint32_t i = 0; i < n; i++) {
+		a += (double)p_loop[i].cross(p_loop[(i + 1) % n]);
+	}
+	return a * 0.5;
+}
+
+// Drop boundary vertices sitting on the straight line between their neighbours —
+// the T-junction fragmentation leaves long runs of them, and they are the bulk of
+// the triangle count the cap was fighting.
+static void _surface_light_drop_collinear(LocalVector<Vector2> &r_loop) {
+	bool changed = true;
+	while (changed && r_loop.size() > 3) {
+		changed = false;
+		for (uint32_t i = 0; i < r_loop.size() && r_loop.size() > 3;) {
+			const Vector2 prev = r_loop[(i + r_loop.size() - 1) % r_loop.size()];
+			const Vector2 cur = r_loop[i];
+			const Vector2 next = r_loop[(i + 1) % r_loop.size()];
+			const Vector2 seg = next - prev;
+			const float seg_len = seg.length();
+			// A backtracking spike (next == prev) is not collinear slop: removing
+			// its tip would change the shape, so the zero-length case keeps it.
+			const float dev = seg_len > CMP_EPSILON ? Math::abs(seg.cross(cur - prev)) / seg_len : cur.distance_to(prev);
+			if (dev <= SURFACE_LIGHT_COLLINEAR_EPS) {
+				r_loop.remove_at(i);
+				changed = true;
+			} else {
+				i++;
+			}
+		}
+	}
+}
+
+// True when the candidate bridge a-b properly crosses any loop edge. Edges that
+// merely share an endpoint with the bridge are not crossings.
+static bool _surface_light_bridge_blocked(const Vector2 &p_a, const Vector2 &p_b, const LocalVector<LocalVector<Vector2>> &p_loops) {
+	for (uint32_t l = 0; l < p_loops.size(); l++) {
+		const LocalVector<Vector2> &loop = p_loops[l];
+		const uint32_t n = loop.size();
+		for (uint32_t i = 0; i < n; i++) {
+			const Vector2 &e0 = loop[i];
+			const Vector2 &e1 = loop[(i + 1) % n];
+			if (e0.is_equal_approx(p_a) || e0.is_equal_approx(p_b) || e1.is_equal_approx(p_a) || e1.is_equal_approx(p_b)) {
+				continue;
+			}
+			Vector2 hit;
+			if (Geometry2D::segment_intersects_segment(p_a, p_b, e0, e1, &hit)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Rebuild an island's polygon from its boundary. On success fills r_tris_2d with
+// flat triangle triples in the island's (t_axis, b_axis) frame, relative to the
+// island centroid, wound CCW (geometric normal along the island normal). Returns
+// false when the member triangles are not a clean tessellation of a single
+// region.
+static bool _surface_light_simplify_island(const LocalVector<SurfaceLightTri> &p_tris, const Vector3 &p_centroid, const Vector3 &p_t_axis, const Vector3 &p_b_axis, float p_island_area, LocalVector<Vector2> &r_tris_2d) {
+	r_tris_2d.clear();
+
+	// Unique 2D vertices + CCW index triangles.
+	const float inv_weld = 1.0f / SURFACE_LIGHT_WELD_EPS;
+	HashMap<SurfaceLightVert2Key, int32_t, SurfaceLightVert2KeyHasher> vert_ids;
+	LocalVector<Vector2> verts;
+	LocalVector<int32_t> tri_idx;
+	for (uint32_t m = 0; m < p_tris.size(); m++) {
+		int32_t id[3];
+		for (int k = 0; k < 3; k++) {
+			const Vector3 rel = p_tris[m].v[k] - p_centroid;
+			const Vector2 p(rel.dot(p_t_axis), rel.dot(p_b_axis));
+			const SurfaceLightVert2Key key{ (int32_t)Math::round(p.x * inv_weld), (int32_t)Math::round(p.y * inv_weld) };
+			HashMap<SurfaceLightVert2Key, int32_t, SurfaceLightVert2KeyHasher>::Iterator it = vert_ids.find(key);
+			if (it == vert_ids.end()) {
+				id[k] = (int32_t)verts.size();
+				verts.push_back(p);
+				vert_ids.insert(key, id[k]);
+			} else {
+				id[k] = it->value;
+			}
+		}
+		if (id[0] == id[1] || id[1] == id[2] || id[0] == id[2]) {
+			// Collapsed by the weld: its edges cancel in place, so it neither
+			// bounds the island nor carries area.
+			continue;
+		}
+		const float cr = (verts[id[1]] - verts[id[0]]).cross(verts[id[2]] - verts[id[0]]);
+		if (Math::abs(cr) < CMP_EPSILON) {
+			return false; // Three distinct but collinear verts: no usable winding.
+		}
+		if (cr < 0.0f) {
+			SWAP(id[1], id[2]);
+		}
+		tri_idx.push_back(id[0]);
+		tri_idx.push_back(id[1]);
+		tri_idx.push_back(id[2]);
+	}
+	if (tri_idx.size() < 3) {
+		return false;
+	}
+
+	// Directed edge set. A clean tessellation uses every directed edge at most
+	// once; an interior edge appears once in each direction, a boundary edge in
+	// only one.
+	HashMap<uint64_t, int32_t> edge_set;
+	for (uint32_t e = 0; e < tri_idx.size(); e += 3) {
+		for (int k = 0; k < 3; k++) {
+			const uint64_t key = ((uint64_t)(uint32_t)tri_idx[e + k] << 32) | (uint64_t)(uint32_t)tri_idx[e + (k + 1) % 3];
+			if (edge_set.has(key)) {
+				return false; // Overlapping or duplicated winding.
+			}
+			edge_set.insert(key, 1);
+		}
+	}
+
+	HashMap<int32_t, LocalVector<int32_t>> next_from;
+	uint32_t boundary_edges = 0;
+	for (const KeyValue<uint64_t, int32_t> &kv : edge_set) {
+		const uint32_t a = (uint32_t)(kv.key >> 32);
+		const uint32_t b = (uint32_t)(kv.key & 0xffffffffULL);
+		if (edge_set.has(((uint64_t)b << 32) | (uint64_t)a)) {
+			continue; // Interior.
+		}
+		next_from[(int32_t)a].push_back((int32_t)b);
+		boundary_edges++;
+	}
+	if (boundary_edges < 3) {
+		return false;
+	}
+
+	// Chain boundary edges into closed loops.
+	LocalVector<LocalVector<Vector2>> loops;
+	uint32_t consumed = 0;
+	for (KeyValue<int32_t, LocalVector<int32_t>> &kv : next_from) {
+		while (!kv.value.is_empty()) {
+			const int32_t start = kv.key;
+			int32_t cur = start;
+			LocalVector<int32_t> loop_idx;
+			bool closed = false;
+			while (loop_idx.size() <= boundary_edges) {
+				LocalVector<int32_t> *outs = next_from.getptr(cur);
+				if (!outs || outs->is_empty()) {
+					break;
+				}
+				const int32_t nxt = (*outs)[outs->size() - 1];
+				outs->remove_at(outs->size() - 1);
+				consumed++;
+				loop_idx.push_back(cur);
+				cur = nxt;
+				if (cur == start) {
+					closed = true;
+					break;
+				}
+			}
+			if (!closed || loop_idx.size() < 3) {
+				return false;
+			}
+			LocalVector<Vector2> loop;
+			loop.resize(loop_idx.size());
+			for (uint32_t i = 0; i < loop_idx.size(); i++) {
+				loop[i] = verts[loop_idx[i]];
+			}
+			_surface_light_drop_collinear(loop);
+			if (loop.size() >= 3) {
+				loops.push_back(loop);
+			}
+		}
+	}
+	if (consumed != boundary_edges || loops.is_empty()) {
+		return false;
+	}
+
+	// Exactly one outer loop; the rest are holes (a pillar standing in a lava
+	// pool). Degenerate zero-area loops are dropped.
+	LocalVector<Vector2> outer;
+	LocalVector<LocalVector<Vector2>> holes;
+	for (uint32_t l = 0; l < loops.size(); l++) {
+		const double a = _surface_light_loop_area(loops[l]);
+		if (a > (double)SURFACE_LIGHT_MIN_AREA) {
+			if (!outer.is_empty()) {
+				return false;
+			}
+			outer = loops[l];
+		} else if (a < -(double)SURFACE_LIGHT_MIN_AREA) {
+			// Kept CW, i.e. opposite the outer contour: traversed that way the hole
+			// boundary keeps the island's material on the same side the outer
+			// traversal does, which is what the bridge splice below needs.
+			holes.push_back(loops[l]);
+		}
+	}
+	if (outer.size() < 3) {
+		return false;
+	}
+
+	// Splice each hole into the outer contour with a zero-width bridge (the
+	// shortest hole->outer vertex pair whose connecting segment crosses nothing),
+	// producing one simple polygon the ear clipper can handle.
+	while (!holes.is_empty()) {
+		uint32_t hole_verts = 0;
+		for (uint32_t h = 0; h < holes.size(); h++) {
+			hole_verts += holes[h].size();
+		}
+		if ((uint64_t)hole_verts * (uint64_t)outer.size() > SURFACE_LIGHT_BRIDGE_WORK_LIMIT) {
+			return false;
+		}
+		LocalVector<LocalVector<Vector2>> obstacles;
+		obstacles.push_back(outer);
+		for (uint32_t h = 0; h < holes.size(); h++) {
+			obstacles.push_back(holes[h]);
+		}
+		uint32_t best_h = 0;
+		uint32_t best_hi = 0;
+		uint32_t best_oi = 0;
+		float best_d = 0.0f;
+		bool found = false;
+		for (uint32_t h = 0; h < holes.size(); h++) {
+			for (uint32_t hi = 0; hi < holes[h].size(); hi++) {
+				for (uint32_t oi = 0; oi < outer.size(); oi++) {
+					const float d = outer[oi].distance_squared_to(holes[h][hi]);
+					if (found && d >= best_d) {
+						continue;
+					}
+					if (_surface_light_bridge_blocked(outer[oi], holes[h][hi], obstacles)) {
+						continue;
+					}
+					best_h = h;
+					best_hi = hi;
+					best_oi = oi;
+					best_d = d;
+					found = true;
+				}
+			}
+		}
+		if (!found) {
+			return false;
+		}
+		const LocalVector<Vector2> hole = holes[best_h];
+		LocalVector<Vector2> merged;
+		merged.reserve(outer.size() + hole.size() + 2);
+		for (uint32_t i = 0; i <= best_oi; i++) {
+			merged.push_back(outer[i]);
+		}
+		for (uint32_t i = 0; i < hole.size(); i++) {
+			merged.push_back(hole[(best_hi + i) % hole.size()]);
+		}
+		merged.push_back(hole[best_hi]);
+		for (uint32_t i = best_oi; i < outer.size(); i++) {
+			merged.push_back(outer[i]);
+		}
+		outer = merged;
+		holes.remove_at(best_h);
+	}
+
+	if (outer.size() > SURFACE_LIGHT_MAX_BOUNDARY_VERTS) {
+		return false; // Ear clipping is worst-case cubic; don't stall the bake on a pathological contour.
+	}
+
+	Vector<Vector2> poly;
+	poly.resize((int)outer.size());
+	for (uint32_t i = 0; i < outer.size(); i++) {
+		poly.write[(int)i] = outer[i];
+	}
+	const Vector<int> idx = Geometry2D::triangulate_polygon(poly);
+	if (idx.size() < 3 || idx.size() % 3 != 0) {
+		return false;
+	}
+
+	// The simplification is only worth trusting if it reproduces the island's
+	// area. A self-intersecting loop from a pinched boundary or a bad bridge
+	// shows up here and falls back.
+	double tri_area_sum = 0.0;
+	for (int t = 0; t < idx.size(); t += 3) {
+		const Vector2 &a = poly[idx[t + 0]];
+		const Vector2 &b = poly[idx[t + 1]];
+		const Vector2 &c = poly[idx[t + 2]];
+		tri_area_sum += 0.5 * (double)Math::abs((b - a).cross(c - a));
+	}
+	if (Math::abs(tri_area_sum - (double)p_island_area) > (double)p_island_area * ((double)SURFACE_LIGHT_HULL_TOLERANCE - 1.0)) {
+		return false;
+	}
+
+	for (int t = 0; t < idx.size(); t += 3) {
+		Vector2 tv[3] = { poly[idx[t + 0]], poly[idx[t + 1]], poly[idx[t + 2]] };
+		const float cr = (tv[1] - tv[0]).cross(tv[2] - tv[0]);
+		if (0.5f * Math::abs(cr) < SURFACE_LIGHT_MIN_AREA) {
+			continue; // Bridge sliver: no area to emit, no CDF weight to carry.
+		}
+		if (cr < 0.0f) {
+			SWAP(tv[1], tv[2]);
+		}
+		for (int k = 0; k < 3; k++) {
+			r_tris_2d.push_back(tv[k]);
+		}
+	}
+	return r_tris_2d.size() >= 3;
+}
+// </ELIM>
+
 // Shared surface-light island collector: gather emitter triangles from the given
 // meshes, merge coplanar islands (union-find over welded edges gated by exact
 // coplanarity), then extract each island's analytic polygon (convex hull fan when
@@ -1436,6 +1782,10 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 	uint32_t occluded_islands = 0;
 	uint32_t hull_fallback_islands = 0;
 	uint32_t total_poly_verts = 0;
+	uint32_t simplified_islands = 0;
+	uint32_t simplify_failed_islands = 0;
+	uint32_t simplified_tris_in = 0;
+	uint32_t simplified_tris_out = 0;
 
 	for (uint32_t ci = 0; ci < islands.size(); ci++) {
 		const SurfaceLightIsland &isl = islands[ci];
@@ -1505,15 +1855,51 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 			hull_area += 0.5 * (double)hull[h].cross(hull[h + 1]);
 		}
 		const bool convex_exact = hull_n >= 3 && hull_area <= (double)isl.area * (double)SURFACE_LIGHT_HULL_TOLERANCE;
-		const bool over_cap = isl.tris.size() > SURFACE_LIGHT_MAX_POLY_TRIS;
 
-		if ((convex_exact || over_cap) && hull_n >= 3) {
-			// Hull fan. Exact for convex islands; energy-conserving fallback
-			// (radiance spread over the larger hull) for non-convex over cap.
-			if (!convex_exact) {
-				light.radiance_scale = (float)((double)isl.area / MAX(hull_area, 1e-6));
-				hull_fallback_islands++;
+		// <ELIM> A non-convex island is rebuilt from its boundary BEFORE the cap
+		// is consulted, so the cap sees the island's real shape complexity rather
+		// than the importer's T-junction fragmentation. The hull fallback below is
+		// then the pathological-map backstop it was always meant to be, not the
+		// routine outcome for every coplanar-merged multi-brush face.
+		LocalVector<Vector2> simple_tris_2d;
+		bool simplified = false;
+		if (!convex_exact) {
+			simplified = _surface_light_simplify_island(isl.tris, island_centroid, t_axis, b_axis, isl.area, simple_tris_2d);
+			if (simplified) {
+				simplified_islands++;
+				simplified_tris_in += isl.tris.size();
+				simplified_tris_out += (uint32_t)(simple_tris_2d.size() / 3);
+			} else {
+				simplify_failed_islands++;
 			}
+		}
+		const uint32_t emit_tri_count = simplified ? (uint32_t)(simple_tris_2d.size() / 3) : isl.tris.size();
+		const bool over_cap = emit_tri_count > SURFACE_LIGHT_MAX_POLY_TRIS;
+
+		enum EmitMode {
+			EMIT_HULL_FAN,
+			EMIT_SIMPLIFIED,
+			EMIT_RAW_MEMBERS,
+		};
+		EmitMode emit_mode;
+		if (convex_exact && hull_n >= 3) {
+			emit_mode = EMIT_HULL_FAN; // Exact and minimal.
+		} else if (simplified && !over_cap) {
+			emit_mode = EMIT_SIMPLIFIED; // Exact.
+		} else if (!over_cap) {
+			emit_mode = EMIT_RAW_MEMBERS; // Exact.
+		} else if (hull_n >= 3) {
+			// Last resort: radiance spread over the larger hull conserves the
+			// island's emitted power but smears it geometrically.
+			light.radiance_scale = (float)((double)isl.area / MAX(hull_area, 1e-6));
+			hull_fallback_islands++;
+			emit_mode = EMIT_HULL_FAN;
+		} else {
+			emit_mode = EMIT_RAW_MEMBERS; // No usable hull; exactness beats the cap.
+		}
+		// </ELIM>
+
+		if (emit_mode == EMIT_HULL_FAN) {
 			// convex_hull output is CCW in the (t_axis, b_axis) frame, so fan
 			// triangles are already wound with their geometric normal along
 			// cnormal.
@@ -1527,12 +1913,20 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 					}
 				}
 			}
+		} else if (emit_mode == EMIT_SIMPLIFIED) {
+			// Boundary-rebuilt triangles, already CCW in the (t_axis, b_axis)
+			// frame and therefore wound along cnormal.
+			for (uint32_t m = 0; m < simple_tris_2d.size(); m++) {
+				const Vector3 v3 = island_centroid + t_axis * simple_tris_2d[m].x + b_axis * simple_tris_2d[m].y;
+				light.poly_verts.push_back(v3 + cnormal * p_pos_bias);
+				if (p_capture_geometry) {
+					light.dbg_verts.push_back(v3);
+				}
+			}
 		} else {
-			// Raw member triangles (exact for non-convex under the cap; also
-			// the degenerate-hull fallback). Winding-normalize each against
-			// the island normal — the cross product's sign depends on source
-			// winding (Godot fronts wind clockwise) and only the vertex
-			// normal is authoritative.
+			// Raw member triangles. Winding-normalize each against the island
+			// normal — the cross product's sign depends on source winding (Godot
+			// fronts wind clockwise) and only the vertex normal is authoritative.
 			for (uint32_t m = 0; m < isl.tris.size(); m++) {
 				const SurfaceLightTri &tri = isl.tris[m];
 				if (tri.area < SURFACE_LIGHT_MIN_AREA) {
@@ -1566,8 +1960,10 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 	if (!p_capture_geometry) {
 		print_line(vformat("LightmapGI: surface-light collector — %d island light(s), total emissive area %.1f m^2, %d polygon vert(s), %d hull-fallback island(s), %d occluded island(s) culled.",
 				(int)r_islands.size(), total_area, (int)total_poly_verts, (int)hull_fallback_islands, (int)occluded_islands));
+		print_line(vformat("LightmapGI: surface-light simplification — %d non-convex island(s) rebuilt from their boundary (%d member tri(s) -> %d exact tri(s)), %d could not be rebuilt.",
+				(int)simplified_islands, (int)simplified_tris_in, (int)simplified_tris_out, (int)simplify_failed_islands));
 		if (hull_fallback_islands > 0) {
-			WARN_PRINT(vformat("LightmapGI: %d non-convex emitter island(s) exceeded %d triangles and fell back to their convex hull (energy-conserving but geometrically smeared). Raise SURFACE_LIGHT_MAX_POLY_TRIS if this matters on this map.", (int)hull_fallback_islands, (int)SURFACE_LIGHT_MAX_POLY_TRIS));
+			WARN_PRINT(vformat("LightmapGI: %d emitter island(s) still exceed %d triangles after boundary simplification and fell back to their convex hull — power-conserving, but the light is smeared over non-emissive geometry and the emitter itself is dimmed by island_area/hull_area. Raise SURFACE_LIGHT_MAX_POLY_TRIS.", (int)hull_fallback_islands, (int)SURFACE_LIGHT_MAX_POLY_TRIS));
 		}
 	}
 }

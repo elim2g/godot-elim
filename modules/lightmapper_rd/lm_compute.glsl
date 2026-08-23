@@ -578,6 +578,65 @@ float trace_shadow_transmittance(vec3 p_origin, vec3 p_target, bool p_skip_sky, 
 }
 // </ELIM>
 
+// <ELIM> One triangle's contribution to the analytic irradiance vector: horizon
+// clip against the receiver's tangent plane, then the spherical edge sum.
+// Factored out of trace_direct_light because the visibility pass needs each
+// triangle's contribution SEPARATELY. Recomputed rather than stored: an island
+// can carry hundreds of triangles and there is no per-triangle scratch, and
+// recomputing keeps the two passes provably identical.
+vec3 surface_light_tri_irradiance(uint p_base, uint p_tri, vec3 p_position, vec3 p_normal) {
+	vec3 tv[3] = vec3[](
+			poly_verts.data[p_base + p_tri * 3u + 0u].xyz - p_position,
+			poly_verts.data[p_base + p_tri * 3u + 1u].xyz - p_position,
+			poly_verts.data[p_base + p_tri * 3u + 2u].xyz - p_position);
+	// A receiver texel coincident with a polygon vertex would normalize a ~zero
+	// vector into NaN and poison the whole sum; dropping the one sliver triangle
+	// at exact contact is invisible.
+	if (dot(tv[0], tv[0]) < 1e-12 || dot(tv[1], tv[1]) < 1e-12 || dot(tv[2], tv[2]) < 1e-12) {
+		return vec3(0.0);
+	}
+	// Sutherland-Hodgman clip against the receiver tangent plane
+	// dot(p_normal, x) >= 0 (a clipped triangle has at most 4 verts).
+	vec3 clipped[4];
+	int clipped_count = 0;
+	for (int k = 0; k < 3; k++) {
+		vec3 va = tv[k];
+		vec3 vb = tv[(k + 1) % 3];
+		float da = dot(p_normal, va);
+		float db = dot(p_normal, vb);
+		if (da >= 0.0) {
+			clipped[clipped_count++] = va;
+		}
+		if ((da >= 0.0) != (db >= 0.0)) {
+			clipped[clipped_count++] = mix(va, vb, da / (da - db));
+		}
+	}
+	if (clipped_count < 3) {
+		return vec3(0.0);
+	}
+	for (int k = 0; k < clipped_count; k++) {
+		clipped[k] = normalize(clipped[k]);
+	}
+	// CPU packing contract: triangles are wound with their geometric normal ALONG
+	// the island normal; for that winding the canonical += edge sum yields an
+	// irradiance vector pointing away from the lit side, so accumulate NEGATED
+	// (derivation: a downward-facing emitter above a +Z receiver needs its
+	// vertices ordered CW-as-seen-from-the-receiver for a positive += sum, which
+	// is the reverse winding).
+	vec3 e = vec3(0.0);
+	for (int k = 0; k < clipped_count; k++) {
+		vec3 va = clipped[k];
+		vec3 vb = clipped[(k + 1) % clipped_count];
+		vec3 cr = cross(va, vb);
+		float crl = length(cr);
+		if (crl > 1e-7) {
+			e -= (0.5 * acos(clamp(dot(va, vb), -1.0, 1.0)) / crl) * cr;
+		}
+	}
+	return e;
+}
+// </ELIM>
+
 void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool p_soft_shadowing, out vec3 r_light, out vec3 r_light_dir, inout uint r_noise, float p_texel_size, out float r_shadow) {
 	const float EPSILON = 0.00001;
 
@@ -604,12 +663,13 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 	// <ELIM> Analytic polygonal surface light: exact Lambert/Baum edge-sum
 	// irradiance from the island polygon (poly_verts triangle triples,
 	// referenced by pad = first vec4 index and cos_spot_angle = bit-cast tri
-	// count) multiplied by stochastic visibility (ratio estimator). Replaces
-	// the centroid-patch approximation: exact at any distance (no near-field
-	// bright spots) and one light per island instead of one per patch. The
-	// block is fully self-contained and returns — the shared cos_r multiply
-	// below must NOT run (the edge sum already contains the receiver cosine),
-	// and the Vogel-disk penumbra machinery is meaningless for a polygon.
+	// count), scaled by a CONTRIBUTION-WEIGHTED visibility estimate (PASS 2).
+	// Replaces the centroid-patch approximation: exact at any distance (no
+	// near-field bright spots) and one light per island instead of one per
+	// patch. The block is fully self-contained and returns — the shared cos_r
+	// multiply below must NOT run (the edge sum already contains the receiver
+	// cosine), and the Vogel-disk penumbra machinery is meaningless for a
+	// polygon.
 	} else if (light_data.type == LIGHT_TYPE_AREA_POLY) {
 		if (distance(p_position, light_data.position) > light_data.range) {
 			// Energy-derived cutoff (range includes the island bounding radius).
@@ -626,111 +686,107 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 			return;
 		}
 
-		// Exact unoccluded irradiance: per-triangle horizon clip + edge sum
-		// over the spherical projection. CPU packing contract: triangles are
-		// wound with their geometric normal ALONG the island normal; for that
-		// winding the canonical += edge sum yields an irradiance vector
-		// pointing away from the lit side, so accumulate NEGATED (derivation:
-		// a downward-facing emitter above a +Z receiver needs its vertices
-		// ordered CW-as-seen-from-the-receiver for a positive += sum, which is
-		// the reverse winding).
+		// PASS 1: exact unoccluded irradiance. irr_pos additionally accumulates
+		// each triangle's OWN clamped contribution — the measure PASS 2 hands its
+		// rays out over. It is tracked separately from poly_irr because a
+		// numerically negative triangle must not shrink the sampling budget.
 		vec3 e_vec = vec3(0.0);
+		float irr_pos = 0.0;
 		for (uint t = 0u; t < poly_tri_count; t++) {
-			vec3 tv[3] = vec3[](
-					poly_verts.data[poly_base + t * 3u + 0u].xyz - p_position,
-					poly_verts.data[poly_base + t * 3u + 1u].xyz - p_position,
-					poly_verts.data[poly_base + t * 3u + 2u].xyz - p_position);
-			// A receiver texel coincident with a polygon vertex would
-			// normalize a ~zero vector into NaN and poison the whole sum;
-			// dropping the one sliver triangle at exact contact is invisible.
-			if (dot(tv[0], tv[0]) < 1e-12 || dot(tv[1], tv[1]) < 1e-12 || dot(tv[2], tv[2]) < 1e-12) {
-				continue;
-			}
-			// Sutherland-Hodgman clip against the receiver tangent plane
-			// dot(p_normal, x) >= 0 (a clipped triangle has at most 4 verts).
-			vec3 clipped[4];
-			int clipped_count = 0;
-			for (int k = 0; k < 3; k++) {
-				vec3 va = tv[k];
-				vec3 vb = tv[(k + 1) % 3];
-				float da = dot(p_normal, va);
-				float db = dot(p_normal, vb);
-				if (da >= 0.0) {
-					clipped[clipped_count++] = va;
-				}
-				if ((da >= 0.0) != (db >= 0.0)) {
-					clipped[clipped_count++] = mix(va, vb, da / (da - db));
-				}
-			}
-			if (clipped_count < 3) {
-				continue;
-			}
-			for (int k = 0; k < clipped_count; k++) {
-				clipped[k] = normalize(clipped[k]);
-			}
-			for (int k = 0; k < clipped_count; k++) {
-				vec3 va = clipped[k];
-				vec3 vb = clipped[(k + 1) % clipped_count];
-				vec3 cr = cross(va, vb);
-				float crl = length(cr);
-				if (crl > 1e-7) {
-					e_vec -= (0.5 * acos(clamp(dot(va, vb), -1.0, 1.0)) / crl) * cr;
-				}
-			}
+			vec3 e_t = surface_light_tri_irradiance(poly_base, t, p_position, p_normal);
+			e_vec += e_t;
+			irr_pos += max(dot(e_t, p_normal), 0.0);
 		}
 		float poly_irr = dot(e_vec, p_normal);
-		if (poly_irr <= 0.0001) {
+		if (poly_irr <= 0.0001 || irr_pos <= 0.0001) {
 			return;
 		}
 
-		// Visibility (ratio estimator): the analytic term above stays exact;
-		// N rays toward area-weighted sample points on the island estimate
-		// occlusion only. Per-ray transparent-tint / opaque-block semantics
-		// match the punctual paths via trace_shadow_transmittance. Noise can
-		// only appear where visibility is partial.
+		// PASS 2: visibility as a CONTRIBUTION-weighted ratio estimator.
+		//
+		// The analytic term above is dominated by whatever part of the island is
+		// nearest this texel. Sampling visibility uniformly over the island's AREA
+		// therefore measures the wrong thing, and the error is unbounded: on
+		// dfwc2017-6 a wall pressed against one corner of a 337 m lava island drew
+		// 90% of its irradiance from 2 of 64 triangles holding 3.4% of the area,
+		// so ~97% of its rays probed lava 170 m away behind walls. Visibility
+		// collapsed to a few percent and the wall baked black while a neighbour
+		// beside a smaller island lit correctly — the on/off pattern tracked which
+		// island a surface bordered, not its local geometry. More rays could not
+		// help: the estimator was biased, not noisy.
+		//
+		// So rays are handed out in proportion to each triangle's contribution and
+		// the results recombined the same way, giving sum(E_t * V_t) instead of
+		// sum(E_t) * V_uniform. With V == 1 everywhere this is identical to the
+		// old path, so the closed-form leak-meter result is unchanged.
 		uint vis_rays = p_soft_shadowing ? max(params.surface_light_vis_rays, 1u) : 1u;
-		// Texel-AA origin jitter, capped in world units for the same reason
-		// as the punctual paths (meter-scale texels relocate origins through
-		// walls); the 1-ray bounce/probe path keeps the exact origin.
+		// Texel-AA origin jitter, capped in world units for the same reason as the
+		// punctual paths (meter-scale texels relocate origins through walls); the
+		// 1-ray bounce/probe path keeps the exact origin.
 		float poly_aa_jitter = min(p_texel_size, 0.05);
 		vec3 poly_aux = p_normal.y < 0.777 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
 		vec3 poly_tangent = normalize(cross(p_normal, poly_aux));
 		vec3 poly_bitan = normalize(cross(p_normal, poly_tangent));
 
-		float vis = 0.0;
-		vec3 vis_color = vec3(0.0);
-		for (uint i = 0u; i < vis_rays; i++) {
-			vec3 origin = p_position;
-			if (p_soft_shadowing) {
-				vec2 disk_sample = (halton_map[i % uint(AA_SAMPLES)] - vec2(0.5)) * poly_aa_jitter;
-				origin -= disk_sample.x * poly_tangent + disk_sample.y * poly_bitan;
+		float e_cum = 0.0;
+		uint rays_used = 0u;
+		float vis_weighted = 0.0;
+		vec3 color_weighted = vec3(0.0);
+		float irr_sampled = 0.0;
+		for (uint t = 0u; t < poly_tri_count && rays_used < vis_rays; t++) {
+			float e_t = max(dot(surface_light_tri_irradiance(poly_base, t, p_position, p_normal), p_normal), 0.0);
+			if (e_t <= 0.0) {
+				continue; // Behind the receiver horizon: contributes nothing to weigh.
 			}
-			// Area-weighted triangle pick (normalized CDF in w of each
-			// triangle's first vertex), then a uniform barycentric point.
-			float u = randomize(r_noise);
-			uint pick = poly_tri_count - 1u;
-			for (uint t = 0u; t < poly_tri_count; t++) {
-				if (u <= poly_verts.data[poly_base + t * 3u].w) {
-					pick = t;
-					break;
+			e_cum += e_t;
+			// Rays that should have been spent by the end of this triangle, minus
+			// what has been spent. Allocating from a running total (rather than
+			// rounding each share independently) cannot drift or overspend.
+			uint want = min(uint(floor(e_cum / irr_pos * float(vis_rays) + 0.5)), vis_rays);
+			if (want <= rays_used) {
+				continue; // Share too small to have earned a ray yet.
+			}
+			uint rays_t = want - rays_used;
+			uint ray_base = rays_used;
+			rays_used = want;
+
+			vec3 pa = poly_verts.data[poly_base + t * 3u + 0u].xyz;
+			vec3 pb = poly_verts.data[poly_base + t * 3u + 1u].xyz;
+			vec3 pc = poly_verts.data[poly_base + t * 3u + 2u].xyz;
+			float v_t = 0.0;
+			vec3 c_t = vec3(0.0);
+			for (uint i = 0u; i < rays_t; i++) {
+				vec3 origin = p_position;
+				if (p_soft_shadowing) {
+					// Indexed by the GLOBAL ray number so the AA disk stays well
+					// distributed across the texel instead of restarting per triangle.
+					vec2 disk_sample = (halton_map[(ray_base + i) % uint(AA_SAMPLES)] - vec2(0.5)) * poly_aa_jitter;
+					origin -= disk_sample.x * poly_tangent + disk_sample.y * poly_bitan;
 				}
+				// Uniform barycentric point on this triangle.
+				float r1 = sqrt(randomize(r_noise));
+				float r2 = randomize(r_noise);
+				vec3 target = pa * (1.0 - r1) + pb * (r1 * (1.0 - r2)) + pc * (r1 * r2);
+
+				vec3 sample_color;
+				v_t += trace_shadow_transmittance(origin, target, skip_sky, light_data.color.rgb, sample_color);
+				c_t += sample_color;
 			}
-			vec3 pa = poly_verts.data[poly_base + pick * 3u + 0u].xyz;
-			vec3 pb = poly_verts.data[poly_base + pick * 3u + 1u].xyz;
-			vec3 pc = poly_verts.data[poly_base + pick * 3u + 2u].xyz;
-			float r1 = sqrt(randomize(r_noise));
-			float r2 = randomize(r_noise);
-			vec3 target = pa * (1.0 - r1) + pb * (r1 * (1.0 - r2)) + pc * (r1 * r2);
-
-			vec3 sample_color;
-			vis += trace_shadow_transmittance(origin, target, skip_sky, light_data.color.rgb, sample_color);
-			vis_color += sample_color;
+			vis_weighted += e_t * (v_t / float(rays_t));
+			color_weighted += e_t * (c_t / float(rays_t));
+			irr_sampled += e_t;
 		}
-		vis /= float(vis_rays);
-		vis_color /= float(vis_rays);
+		if (irr_sampled <= 0.0) {
+			return;
+		}
+		// Irradiance-weighted mean visibility. Triangles whose share was too small
+		// to earn a ray are folded into this average rather than dropped, so their
+		// part of the irradiance is still represented.
+		float vis = vis_weighted / irr_sampled;
+		vec3 vis_color = color_weighted / irr_sampled;
 
-		// Net incoming direction = normalized vector irradiance (better for
-		// the SH/directional accumulation than direction-to-centroid).
+		// Net incoming direction = normalized vector irradiance (better for the
+		// SH/directional accumulation than direction-to-centroid).
 		r_light_dir = normalize(e_vec);
 		r_light = light_data.energy * poly_irr * vis * vis_color;
 		r_shadow = vis;

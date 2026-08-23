@@ -153,24 +153,22 @@ void LightmapperRD::add_spot_light(const String &p_name, bool p_static, const Ve
 // and bias-offset by the caller) in the poly_verts SSBO. Reuses the punctual
 // Light struct: `attenuation` carries the island AREA (reference), `size` the
 // island bounding radius (reference), `pad` the first vec4 index into the
-// polygon buffer, and `cos_spot_angle` the bit-cast triangle count. w of each
-// triangle's first vec4 stores the normalized area CDF after that triangle,
-// for area-weighted visibility sampling. lights.sort() is safe: the reference
-// travels inside the struct.
+// polygon buffer, and `cos_spot_angle` the bit-cast triangle count. The w
+// component is unused padding: visibility sampling used to walk an area CDF
+// stored there, but the shader now hands rays out by each triangle's analytic
+// contribution to the receiving texel, which no CPU-side table can express.
+// lights.sort() is safe: the reference travels inside the struct.
 void LightmapperRD::add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts) {
 	const int tri_count = p_poly_verts.size() / 3;
 	ERR_FAIL_COND_MSG(tri_count < 1 || p_poly_verts.size() % 3 != 0, vformat("Area poly light '%s' needs a non-empty multiple-of-3 vertex list (got %d).", p_name, p_poly_verts.size()));
 
-	// Per-triangle areas for the sampling CDF. A zero-area polygon can't emit.
-	LocalVector<float> tri_areas;
-	tri_areas.resize(tri_count);
+	// A zero-area polygon can't emit.
 	double area_total = 0.0;
 	for (int t = 0; t < tri_count; t++) {
 		const Vector3 &a = p_poly_verts[t * 3 + 0];
 		const Vector3 &b = p_poly_verts[t * 3 + 1];
 		const Vector3 &c = p_poly_verts[t * 3 + 2];
-		tri_areas[t] = 0.5f * (b - a).cross(c - a).length();
-		area_total += (double)tri_areas[t];
+		area_total += 0.5 * (double)(b - a).cross(c - a).length();
 	}
 	if (area_total <= 0.0) {
 		WARN_PRINT(vformat("Area poly light '%s' has zero polygon area; skipped.", p_name));
@@ -200,15 +198,14 @@ void LightmapperRD::add_area_poly_light(const String &p_name, bool p_static, con
 	memcpy(&l.cos_spot_angle, &tc_bits, sizeof(uint32_t));
 
 	float bounding_radius = 0.0f;
-	double cdf = 0.0;
+	poly_verts_data.reserve(poly_verts_data.size() + tri_count * 12);
 	for (int t = 0; t < tri_count; t++) {
-		cdf += (double)tri_areas[t] / area_total;
 		for (int k = 0; k < 3; k++) {
 			const Vector3 &v = p_poly_verts[t * 3 + k];
 			poly_verts_data.push_back(v.x);
 			poly_verts_data.push_back(v.y);
 			poly_verts_data.push_back(v.z);
-			poly_verts_data.push_back(k == 0 ? (float)cdf : 0.0f);
+			poly_verts_data.push_back(0.0f); // w: unused padding (see the header comment).
 			bounding_radius = MAX(bounding_radius, p_position.distance_to(v));
 		}
 	}
@@ -1970,15 +1967,47 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		// (const int AA_SAMPLES = 16; shadowing_ray_count = max(1, ray_count / 16)).
 		const int64_t aa_samples = 16;
 		const int64_t rays_per_texel = aa_samples * MAX((int64_t)1, (int64_t)push_constant.ray_count / aa_samples);
+		// Per-light per-texel cost weight. Every light costs its soft-shadow
+		// traces; an AREA_POLY light additionally walks its polygon TWICE per
+		// texel (once for the analytic irradiance, once to hand visibility rays
+		// out by contribution), work the trace count alone cannot see. Charging
+		// two trace-equivalents per polygon triangle keeps a geometrically complex
+		// emitter island from silently inflating a dispatch past the watchdog, so
+		// the collector's per-island triangle cap can be generous. The term is
+		// ADDITIVE on top of the trace-only model, so batches can only get
+		// smaller than before — never larger.
+		LocalVector<int64_t> light_cost;
+		light_cost.resize(total_light_count);
+		int64_t poly_tris_total = 0;
+		for (int li = 0; li < total_light_count; li++) {
+			int64_t c = rays_per_texel;
+			if (lights[li].type == LIGHT_TYPE_AREA_POLY) {
+				uint32_t tri_count = 0;
+				memcpy(&tri_count, &lights[li].cos_spot_angle, sizeof(uint32_t));
+				c += 2 * (int64_t)tri_count;
+				poly_tris_total += (int64_t)tri_count;
+			}
+			light_cost[li] = c;
+		}
 		{
 			// Diagnostic for the full (bottleneck) region; edge regions get a larger
 			// batch computed in the loop. Always printed so a bake hang/crash can be
 			// traced to the chosen granularity.
 			const int64_t rep_texels = (int64_t)max_region_size * (int64_t)max_region_size;
-			const int rep_lights_per_pass = MIN((int)CLAMP(max_traces_per_dispatch / MAX((int64_t)1, rep_texels * rays_per_texel), (int64_t)1, (int64_t)max_lights_per_pass), MAX(1, total_light_count));
-			const int rep_iterations = Math::division_round_up(MAX(1, total_light_count), MAX(1, rep_lights_per_pass));
-			print_line(vformat("LightmapGI/RD: direct-light batching: %d light(s), ray_count=%d (~%d soft-shadow traces/texel/light), region=%d^2 -> %d light(s)/dispatch, %d batch(es)/region.",
-					total_light_count, (int)push_constant.ray_count, (int)rays_per_texel, max_region_size, rep_lights_per_pass, rep_iterations));
+			const int64_t rep_budget = MAX((int64_t)1, max_traces_per_dispatch / rep_texels);
+			int rep_iterations = 0;
+			for (int li = 0; li < total_light_count;) {
+				int64_t acc = 0;
+				const int batch_start = li;
+				while (li < total_light_count && (li - batch_start) < max_lights_per_pass && (li == batch_start || acc + light_cost[li] <= rep_budget)) {
+					acc += light_cost[li];
+					li++;
+				}
+				rep_iterations++;
+			}
+			rep_iterations = MAX(1, rep_iterations);
+			print_line(vformat("LightmapGI/RD: direct-light batching: %d light(s) (%d area-poly tri(s)), ray_count=%d (~%d soft-shadow traces/texel/light), region=%d^2 -> %d batch(es)/region.",
+					total_light_count, (int)poly_tris_total, (int)push_constant.ray_count, (int)rays_per_texel, max_region_size, rep_iterations));
 		}
 		// </ELIM>
 
@@ -2015,11 +2044,20 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 					// rd->submit();
 					// rd->sync();
 					const int64_t region_texels = (int64_t)w * (int64_t)h;
-					const int lights_per_pass = MIN((int)CLAMP(max_traces_per_dispatch / MAX((int64_t)1, region_texels * rays_per_texel), (int64_t)1, (int64_t)max_lights_per_pass), MAX(1, total_light_count));
-					const int light_iterations = Math::division_round_up(MAX(1, total_light_count), MAX(1, lights_per_pass));
-					for (int lb = 0; lb < light_iterations; lb++) {
-						push_constant.light_from = (uint32_t)(lb * lights_per_pass);
-						push_constant.light_to = (uint32_t)MIN((lb + 1) * lights_per_pass, total_light_count);
+					const int64_t budget = MAX((int64_t)1, max_traces_per_dispatch / MAX((int64_t)1, region_texels));
+					int light_from = 0;
+					// do/while: with no lights at all the region still needs its one
+					// dispatch, which is what initializes the outputs (first_light_batch).
+					do {
+						int light_to = light_from;
+						int64_t acc = 0;
+						while (light_to < total_light_count && (light_to - light_from) < max_lights_per_pass && (light_to == light_from || acc + light_cost[light_to] <= budget)) {
+							acc += light_cost[light_to];
+							light_to++;
+						}
+						push_constant.light_from = (uint32_t)light_from;
+						push_constant.light_to = (uint32_t)light_to;
+						light_from = light_to;
 
 						RD::ComputeListID compute_list = rd->compute_list_begin();
 						rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_primary_pipeline);
@@ -2031,7 +2069,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 						rd->submit();
 						rd->sync();
-					}
+					} while (light_from < total_light_count);
 					// </ELIM>
 
 					count++;
