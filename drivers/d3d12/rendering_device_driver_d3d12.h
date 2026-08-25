@@ -135,6 +135,9 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
 	Microsoft::WRL::ComPtr<ID3D12Device> device;
 	DeviceLimits device_limits;
+	// <ELIM> TURNT Insights: kept alive purely so GetClockCalibration has a queue to ask. Created alongside the timestamp-frequency query.
+	Microsoft::WRL::ComPtr<ID3D12CommandQueue> calibration_command_queue;
+	// </ELIM>
 	RDD::Capabilities device_capabilities;
 	uint32_t feature_level = 0; // Major * 10 + minor.
 	SubgroupCapabilities subgroup_capabilities;
@@ -857,6 +860,9 @@ public:
 	virtual void timestamp_query_pool_free(QueryPoolID p_pool_id) override final;
 	virtual void timestamp_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) override final;
 	virtual uint64_t timestamp_query_result_to_time(uint64_t p_result) override final;
+	// <ELIM> TURNT Insights: GPU/CPU clock calibration via ID3D12CommandQueue::GetClockCalibration.
+	virtual bool timestamp_get_clock_calibration(uint64_t *r_gpu_ticks, uint64_t *r_cpu_ticks) override final;
+	// </ELIM>
 
 	// Commands.
 	virtual void command_timestamp_query_pool_reset(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_query_count) override final;

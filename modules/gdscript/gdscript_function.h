@@ -465,6 +465,14 @@ private:
 	Variant rpc_config;
 
 	GDScript *_script = nullptr;
+	// <ELIM> TURNT Insights: cache slot for this function's interned source location.
+	// GDScriptFunction::call() is instrumented, so without a per-function slot
+	// every single script call would re-resolve the location through a locked
+	// table. 0 means "not yet interned"; ids are valid for the life of the
+	// process, so this survives across captures. Unused when the engine is built
+	// without a profiler backend.
+	uint32_t _profile_loc_id = 0;
+	// </ELIM>
 	int _initial_line = 0;
 	int _argument_count = 0;
 	int _vararg_index = -1;

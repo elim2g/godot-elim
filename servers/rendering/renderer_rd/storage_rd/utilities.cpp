@@ -29,6 +29,9 @@
 /**************************************************************************/
 
 #include "utilities.h"
+// <ELIM> TURNT Insights GPU marker filter in capture_timestamp().
+#include "core/profiling/insights_singleton.h"
+// </ELIM>
 #include "../environment/fog.h"
 #include "../environment/gi.h"
 #include "light_storage.h"
@@ -223,6 +226,16 @@ void Utilities::capture_timestamps_begin() {
 }
 
 void Utilities::capture_timestamp(const String &p_name) {
+	// <ELIM> TURNT Insights: thin the marker set in coarse GPU-capture mode.
+	// Every captured timestamp becomes an ordering fence in the render graph, so
+	// recording all ~70 of a frame's markers measurably changes the frame being
+	// measured. This is the single funnel for every RENDER_TIMESTAMP on the RD
+	// backends, so it is the one place the set can be thinned before that cost is
+	// paid. Returns true for everything when coarse mode is off.
+	if (!TntInsights::gpu_marker_allowed(p_name)) {
+		return;
+	}
+	// </ELIM>
 	RD::get_singleton()->capture_timestamp(p_name);
 }
 

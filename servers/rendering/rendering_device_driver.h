@@ -732,6 +732,14 @@ public:
 	virtual void timestamp_query_pool_free(QueryPoolID p_pool_id) = 0;
 	virtual void timestamp_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) = 0;
 	virtual uint64_t timestamp_query_result_to_time(uint64_t p_result) = 0;
+	// <ELIM> TURNT Insights: GPU/CPU clock calibration.
+	// GPU timestamps count from an arbitrary GPU epoch, so on their own they can
+	// only produce durations. Sampling a (gpu, cpu) pair from the same instant is
+	// what lets the GPU track be laid over the CPU timeline. r_cpu_ticks is a raw
+	// performance-counter value. Drivers that cannot do this return false and the
+	// GPU track is omitted rather than drawn somewhere misleading.
+	virtual bool timestamp_get_clock_calibration(uint64_t *r_gpu_ticks, uint64_t *r_cpu_ticks) { return false; }
+	// </ELIM>
 
 	// Commands.
 	virtual void command_timestamp_query_pool_reset(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_query_count) = 0;

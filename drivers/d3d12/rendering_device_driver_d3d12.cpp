@@ -5533,9 +5533,46 @@ void RenderingDeviceDriverD3D12::timestamp_query_pool_get_results(QueryPoolID p_
 	results_buffer->Unmap(0, &VOID_RANGE);
 }
 
+// <ELIM> TURNT Insights: convert in integer arithmetic instead of via double.
+// A D3D12 timestamp is a large absolute tick count from an arbitrary epoch --
+// measured at ~1.8e18 ns on an RTX 3090 -- which is past the range where a
+// double can represent consecutive integers. Going through double quantized
+// every result to 1024 ns, so anything under about 2 us of GPU work was
+// unmeasurable. The Vulkan driver already avoids this (see the 128-bit
+// fixed-point comment in its timestamp_query_result_to_time); D3D12 did not.
+// uint64_t RenderingDeviceDriverD3D12::timestamp_query_result_to_time(uint64_t p_result) {
+//	return p_result / (double)device_limits.timestamp_frequency * 1000000000.0;
+// }
 uint64_t RenderingDeviceDriverD3D12::timestamp_query_result_to_time(uint64_t p_result) {
-	return p_result / (double)device_limits.timestamp_frequency * 1000000000.0;
+	const uint64_t frequency = device_limits.timestamp_frequency;
+	if (frequency == 0) {
+		return 0;
+	}
+	// Split so the remainder term cannot overflow: the remainder is below the
+	// frequency, and frequencies are well under 1e10.
+	return (p_result / frequency) * 1000000000ULL + ((p_result % frequency) * 1000000000ULL) / frequency;
 }
+// </ELIM>
+
+// <ELIM> TURNT Insights: GPU/CPU clock calibration.
+// The CPU value D3D12 hands back is a QueryPerformanceCounter reading, which is
+// the same clock a capture timestamps its CPU events with, so the pair can be
+// used directly to place the GPU track on the CPU timeline.
+bool RenderingDeviceDriverD3D12::timestamp_get_clock_calibration(uint64_t *r_gpu_ticks, uint64_t *r_cpu_ticks) {
+	if (calibration_command_queue.Get() == nullptr) {
+		return false;
+	}
+	UINT64 gpu_timestamp = 0;
+	UINT64 cpu_timestamp = 0;
+	const HRESULT res = calibration_command_queue->GetClockCalibration(&gpu_timestamp, &cpu_timestamp);
+	if (!SUCCEEDED(res)) {
+		return false;
+	}
+	*r_gpu_ticks = (uint64_t)gpu_timestamp;
+	*r_cpu_ticks = (uint64_t)cpu_timestamp;
+	return true;
+}
+// </ELIM>
 
 void RenderingDeviceDriverD3D12::command_timestamp_query_pool_reset(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_query_count) {
 }
@@ -6190,7 +6227,10 @@ Error RenderingDeviceDriverD3D12::_get_device_limits() {
 	}
 
 	// Retrieving the timestamp frequency requires creating a command queue that will be discarded immediately.
-	ComPtr<ID3D12CommandQueue> unused_command_queue;
+	// <ELIM> TURNT Insights: the queue is retained instead of discarded, so GetClockCalibration has one to ask later.
+	// ComPtr<ID3D12CommandQueue> unused_command_queue;
+	ComPtr<ID3D12CommandQueue> &unused_command_queue = calibration_command_queue;
+	// </ELIM>
 	D3D12_COMMAND_QUEUE_DESC queue_desc = {};
 	queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 	res = device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(unused_command_queue.GetAddressOf()));

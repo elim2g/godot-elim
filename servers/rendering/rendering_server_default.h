@@ -70,6 +70,10 @@ class RenderingServerDefault : public RenderingServer {
 
 	//for printing
 	bool print_gpu_profile = false;
+	// <ELIM> TURNT Insights: tracks whether we turned capturing_timestamps on ourselves, so it can be restored.
+	bool insights_timestamps_armed = false;
+	bool insights_timestamps_previous = false;
+	// </ELIM>
 	HashMap<String, float> print_gpu_profile_task_time;
 	uint64_t print_frame_profile_ticks_from = 0;
 	uint32_t print_frame_profile_frame_count = 0;

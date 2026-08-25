@@ -236,6 +236,24 @@ void godot_init_profiler() {
 void godot_cleanup_profiler() {
 }
 
+// <ELIM> TURNT Insights backend lifecycle.
+#elif defined(GODOT_USE_TURNT_INSIGHTS)
+
+// Both of these run outside the engine's lifetime: init() is called from
+// platform main() before OS/ProjectSettings/FileAccess exist, and cleanup()
+// after Main::cleanup() has torn them down. So init only zeroes POD state, and
+// nothing here touches a file -- captures are opened and closed by
+// TntInsights::start_capture()/stop_capture() while the engine is alive.
+void godot_init_profiler() {
+	tnt_insights::init();
+}
+
+void godot_cleanup_profiler() {
+	tnt_insights::cleanup();
+}
+
+// </ELIM>
+
 #else
 void godot_init_profiler() {
 	// Stub

@@ -78,6 +78,13 @@ const SourceLocationData *intern_source_location(const void *p_function_ptr, con
 #define GodotProfileZoneScriptSystemCall(m_ptr, m_file, m_function, m_name, m_line) \
 	tracy::ScopedZone __godot_tracy_zone_system_call(tracy::intern_source_location(m_ptr, m_file, m_function, m_name, m_line, false))
 
+// <ELIM> TURNT Insights: additive macros, defined by every backend (see the "No profiling" branch for docs).
+#define GodotProfileZoneScriptCached(m_id_ref, m_ptr, m_file, m_function, m_name, m_line) \
+	GodotProfileZoneScript(m_ptr, m_file, m_function, m_name, m_line)
+#define GodotProfileCounter(m_name, m_value) TracyPlot(m_name, m_value)
+#define GodotProfileInstant(m_name) TracyMessageL(m_name)
+// </ELIM>
+
 // Memory allocation
 #ifdef GODOT_PROFILER_TRACK_MEMORY
 #define GodotProfileAlloc(m_ptr, m_size)                       \
@@ -127,6 +134,12 @@ struct PerfettoGroupedEventEnder {
 
 #define GodotProfileZoneScript(m_ptr, m_file, m_function, m_name, m_line)
 #define GodotProfileZoneScriptSystemCall(m_ptr, m_file, m_function, m_name, m_line)
+
+// <ELIM> TURNT Insights: additive macros, defined by every backend (see the "No profiling" branch for docs).
+#define GodotProfileZoneScriptCached(m_id_ref, m_ptr, m_file, m_function, m_name, m_line)
+#define GodotProfileCounter(m_name, m_value) TRACE_COUNTER("godot", m_name, m_value)
+#define GodotProfileInstant(m_name) TRACE_EVENT_INSTANT("godot", m_name)
+// </ELIM>
 
 #define GodotProfileAlloc(m_ptr, m_size)
 #define GodotProfileFree(m_ptr)
@@ -187,12 +200,86 @@ private:
 #define GodotProfileZoneScript(m_ptr, m_file, m_function, m_name, m_line)
 #define GodotProfileZoneScriptSystemCall(m_ptr, m_file, m_function, m_name, m_line)
 
+// <ELIM> TURNT Insights: additive macros, defined by every backend (see the "No profiling" branch for docs).
+#define GodotProfileZoneScriptCached(m_id_ref, m_ptr, m_file, m_function, m_name, m_line)
+#define GodotProfileCounter(m_name, m_value)
+#define GodotProfileInstant(m_name)
+// </ELIM>
+
 // Instruments has its own memory profiling, so these are no-ops.
 #define GodotProfileAlloc(m_ptr, m_size)
 #define GodotProfileFree(m_ptr)
 
 void godot_init_profiler();
 void godot_cleanup_profiler();
+
+// <ELIM> TURNT Insights: self-contained backend that writes a .tntinsight capture (scons profiler=turnt).
+#elif defined(GODOT_USE_TURNT_INSIGHTS)
+
+#include "core/profiling/insights.h"
+
+// Each call site owns a slot holding its interned string id, so a literal is
+// interned once for the life of the process and a zone costs a load, a branch
+// and a 16-byte store.
+//
+// The slot is reached through a stateless lambda rather than a separate
+// `static` declaration so that every macro below stays a SINGLE statement --
+// two statements would silently mis-scope in `if (x) GodotProfileZone(...);`.
+// The static is constant-initialized, so no thread-safe-init guard is emitted
+// and the lambda inlines to a direct address.
+#define _TNT_INS_SLOT() ([]() -> uint32_t & {static uint32_t __tnt_ins_slot = 0; return __tnt_ins_slot; }())
+
+// __LINE__ rather than GD_UNIQUE_NAME: the latter expands __COUNTER__, which
+// would yield a different name on each use within one expansion.
+#define _TNT_INS_CAT2(m_a, m_b) m_a##m_b
+#define _TNT_INS_CAT(m_a, m_b) _TNT_INS_CAT2(m_a, m_b)
+#define _TNT_INS_ZONE _TNT_INS_CAT(__tnt_ins_zone_, __LINE__)
+
+// The real frame boundary is emitted from RenderingServerDefault::_draw, which
+// is the only place that knows a frame was actually presented. This marks a
+// main-loop iteration, which is a different and less useful thing, so it goes
+// on its own track.
+#define GodotProfileFrameMark GodotProfileInstant("Main Loop Iteration")
+
+#define GodotProfileZone(m_zone_name) \
+	::tnt_insights::ScopedZone _TNT_INS_ZONE(_TNT_INS_SLOT(), m_zone_name)
+
+#define GodotProfileZoneGroupedFirst(m_group_name, m_zone_name) \
+	::tnt_insights::GroupedZone __tnt_ins_group_##m_group_name(_TNT_INS_SLOT(), m_zone_name)
+
+#define GodotProfileZoneGroupedEndEarly(m_group_name, m_zone_name) \
+	__tnt_ins_group_##m_group_name.end()
+
+// end() is idempotent, so this stays correct even when a caller has already
+// closed the group with GodotProfileZoneGroupedEndEarly.
+#define GodotProfileZoneGrouped(m_group_name, m_zone_name) \
+	__tnt_ins_group_##m_group_name.restart(_TNT_INS_SLOT(), m_zone_name)
+
+// No cache slot at the call site, so this pays a pointer-keyed lookup and is
+// gated behind CAPTURE_SCRIPT_NATIVE_ZONES, off by default.
+#define GodotProfileZoneScript(m_ptr, m_file, m_function, m_name, m_line) \
+	::tnt_insights::SystemCallZone _TNT_INS_ZONE(m_ptr, m_file, m_function, m_name, m_line)
+
+// Preferred form: the caller owns the id cache (GDScriptFunction carries one),
+// so interning happens once per function rather than once per call.
+#define GodotProfileZoneScriptCached(m_id_ref, m_ptr, m_file, m_function, m_name, m_line) \
+	::tnt_insights::ScriptZone _TNT_INS_ZONE(m_id_ref, m_file, m_function, m_name, m_line)
+
+#define GodotProfileZoneScriptSystemCall(m_ptr, m_file, m_function, m_name, m_line) \
+	::tnt_insights::SystemCallZone _TNT_INS_ZONE(m_ptr, m_file, m_function, m_name, m_line)
+
+#define GodotProfileCounter(m_name, m_value) \
+	::tnt_insights::counter_slot(_TNT_INS_SLOT(), m_name, (double)(m_value))
+
+#define GodotProfileInstant(m_name) \
+	::tnt_insights::instant_slot(_TNT_INS_SLOT(), m_name)
+
+#define GodotProfileAlloc(m_ptr, m_size)
+#define GodotProfileFree(m_ptr)
+
+void godot_init_profiler();
+void godot_cleanup_profiler();
+// </ELIM>
 
 #else
 // No profiling; all macros are stubs.
@@ -224,5 +311,18 @@ void godot_cleanup_profiler();
 #define GodotProfileZoneScript(m_ptr, m_file, m_function, m_name, m_line)
 // Define a zone for a system call from a script (dynamic source location).
 #define GodotProfileZoneScriptSystemCall(m_ptr, m_file, m_function, m_name, m_line)
+
+// <ELIM> TURNT Insights: additive macros. Every backend branch above defines these too.
+// As GodotProfileZoneScript, but the caller supplies a uint32_t lvalue the
+// backend may use to cache the interned source location, so a hot call site
+// interns once rather than once per call. Backends without a cache concept
+// ignore m_id_ref and fall back to the pointer-keyed form.
+#define GodotProfileZoneScriptCached(m_id_ref, m_ptr, m_file, m_function, m_name, m_line)
+// Record a named numeric sample at the current instant. m_name must be a string
+// literal; m_value is anything convertible to double.
+#define GodotProfileCounter(m_name, m_value)
+// Record a zero-duration named event at the current instant.
+#define GodotProfileInstant(m_name)
+// </ELIM>
 
 #endif

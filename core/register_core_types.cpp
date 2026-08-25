@@ -78,6 +78,9 @@
 #include "core/object/worker_thread_pool.h"
 #include "core/os/main_loop.h"
 #include "core/os/time.h"
+// <ELIM> TURNT Insights capture control, exposed to scripts as the TntInsights singleton.
+#include "core/profiling/insights_singleton.h"
+// </ELIM>
 #include "core/string/optimized_translation.h"
 #include "core/string/translation.h"
 #include "core/string/translation_server.h"
@@ -107,6 +110,9 @@ static CoreBind::EngineDebugger *_engine_debugger = nullptr;
 
 static IP *ip = nullptr;
 static Time *_time = nullptr;
+// <ELIM> TURNT Insights.
+static TntInsights *_insights = nullptr;
+// </ELIM>
 
 static CoreBind::Geometry2D *_geometry_2d = nullptr;
 static CoreBind::Geometry3D *_geometry_3d = nullptr;
@@ -142,6 +148,10 @@ void register_core_types() {
 
 	GDREGISTER_CLASS(Time);
 	_time = memnew(Time);
+	// <ELIM> TURNT Insights. Registered in every build; the class is inert when the engine was built without `profiler=turnt`, so shared GDScript still resolves it.
+	GDREGISTER_CLASS(TntInsights);
+	_insights = memnew(TntInsights);
+	// </ELIM>
 	ResourceLoader::initialize();
 
 	Variant::register_types();
@@ -378,6 +388,9 @@ void register_core_singletons() {
 	Engine::get_singleton()->add_singleton(Engine::Singleton("GDExtensionManager", GDExtensionManager::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("ResourceUID", ResourceUID::get_singleton()));
 	Engine::get_singleton()->add_singleton(Engine::Singleton("WorkerThreadPool", worker_thread_pool));
+	// <ELIM> TURNT Insights.
+	Engine::get_singleton()->add_singleton(Engine::Singleton("TntInsights", TntInsights::get_singleton()));
+	// </ELIM>
 
 	OS::get_singleton()->benchmark_end_measure("Core", "Register Singletons");
 }
@@ -409,6 +422,10 @@ void unregister_core_types() {
 	OS::get_singleton()->benchmark_begin_measure("Core", "Unregister Types");
 
 	// Destroy singletons in reverse order to ensure dependencies are not broken.
+
+	// <ELIM> TURNT Insights. Destroyed first: its destructor stops any running capture, which needs FileAccess and the worker thread still standing.
+	memdelete(_insights);
+	// </ELIM>
 
 	memdelete(worker_thread_pool);
 

@@ -32,6 +32,11 @@
 
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
+// <ELIM> TURNT Insights frame boundary and GPU track in _draw().
+#include "core/config/engine.h"
+#include "core/profiling/insights_singleton.h"
+#include "servers/rendering/rendering_device.h"
+// </ELIM>
 #include "renderer_canvas_cull.h"
 #include "renderer_scene_cull.h"
 #include "rendering_server_globals.h"
@@ -67,6 +72,33 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 }
 
 void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
+	// <ELIM> TURNT Insights: the real frame boundary.
+	// GodotProfileFrameMark marks a main-loop iteration, which is not the same
+	// thing: Main::iteration() skips drawing entirely when no window can draw,
+	// the Windows display server re-enters it from WM_TIMER during a window
+	// drag, and force_draw() draws outside the loop cadence. This is the only
+	// place that knows a frame was actually rendered.
+	TntInsights::frame_boundary(Engine::get_singleton()->get_frames_drawn());
+
+	// Arm GPU timestamps here, at the top of the frame and before
+	// TIMESTAMP_BEGIN(), so a frame is never armed halfway through -- that would
+	// manufacture an orphan `>` or `<` on the transition frame. The previous
+	// state is restored on disarm so this cannot clobber --gpu-profile or the
+	// editor's visual profiler.
+	{
+		const bool wants_timestamps = TntInsights::is_gpu_capture_enabled();
+		if (wants_timestamps != insights_timestamps_armed) {
+			if (wants_timestamps) {
+				insights_timestamps_previous = RSG::utilities->capturing_timestamps;
+				RSG::utilities->capturing_timestamps = true;
+			} else {
+				RSG::utilities->capturing_timestamps = insights_timestamps_previous;
+			}
+			insights_timestamps_armed = wants_timestamps;
+		}
+	}
+	// </ELIM>
+
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
 
@@ -126,7 +158,41 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 		_run_post_draw_steps();
 	}
 
-	if (RSG::utilities->get_captured_timestamps_count()) {
+	// <ELIM> TURNT Insights: feed the GPU track.
+	// Done before the frame_profile loop below because that loop is skipped
+	// entirely when Insights is the only thing that wanted timestamps.
+	if (insights_timestamps_armed) {
+		GodotProfileZoneGrouped(_profile_zone, "insights_gpu");
+		const uint32_t timestamp_count = RSG::utilities->get_captured_timestamps_count();
+		RenderingDevice *device = RenderingDevice::get_singleton();
+		if (timestamp_count > 0 && device != nullptr) {
+			const uint64_t record_frame = device->get_captured_timestamps_record_frame();
+
+			// Without a calibration pair the GPU clock has an arbitrary epoch and
+			// the offline tooling omits the track rather than drawing it in the
+			// wrong place.
+			uint64_t gpu_nsec = 0;
+			uint64_t cpu_ticks = 0;
+			if (device->get_clock_calibration(&gpu_nsec, &cpu_ticks)) {
+				TntInsights::gpu_calibration(cpu_ticks, gpu_nsec, record_frame);
+			}
+
+			for (uint32_t i = 0; i < timestamp_count; i++) {
+				TntInsights::gpu_marker(RSG::utilities->get_captured_timestamp_name(i),
+						RSG::utilities->get_captured_timestamp_gpu_time(i), record_frame);
+			}
+		}
+	}
+	// </ELIM>
+
+	// <ELIM> TURNT Insights: skip the frame_profile rebuild when nothing can read it.
+	// frame_profile only has a consumer when something else turned timestamps on
+	// (--gpu-profile, or the editor's visual profiler). When Insights armed them
+	// itself, rebuilding a Vector<FrameProfileArea> of Strings every frame is pure
+	// waste on the path being measured.
+	// if (RSG::utilities->get_captured_timestamps_count()) {
+	if (RSG::utilities->get_captured_timestamps_count() && !(insights_timestamps_armed && !insights_timestamps_previous)) {
+		// </ELIM>
 		GodotProfileZoneGrouped(_profile_zone, "frame_profile");
 		Vector<FrameProfileArea> new_profile;
 		if (RSG::utilities->capturing_timestamps) {

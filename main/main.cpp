@@ -52,6 +52,9 @@
 #include "core/os/os.h"
 #include "core/os/time.h"
 #include "core/profiling/profiling.h"
+// <ELIM> TURNT Insights frame boundary fallback in Main::iteration().
+#include "core/profiling/insights_singleton.h"
+// </ELIM>
 #include "core/register_core_types.h"
 #include "core/string/translation_server.h"
 #include "core/version.h"
@@ -5049,6 +5052,34 @@ bool Main::iteration() {
 
 	GodotProfileZoneGrouped(_profile_zone, "OS::add_frame_delay");
 	OS::get_singleton()->add_frame_delay(DisplayServer::get_singleton()->window_can_draw(), wake_for_events);
+
+	// <ELIM> TURNT Insights: per-frame counters.
+	// Guarded rather than relying on GodotProfileCounter's own check, because the
+	// arguments -- server calls into the rendering info -- are evaluated first.
+	if (TntInsights::wants_counters()) {
+		RenderingServer *rendering_server = RenderingServer::get_singleton();
+		GodotProfileCounter("Frame Time (ms)", frame_time / 1000.0);
+		GodotProfileCounter("Process (ms)", process_ticks / 1000.0);
+		GodotProfileCounter("Physics Process (ms)", physics_process_ticks / 1000.0);
+		GodotProfileCounter("Physics Steps", advance.physics_steps);
+		GodotProfileCounter("Static Memory (MB)", Memory::get_mem_usage() / 1048576.0);
+		GodotProfileCounter("Objects", ObjectDB::get_object_count());
+		if (rendering_server) {
+			GodotProfileCounter("Draw Calls", rendering_server->get_rendering_info(RenderingServer::RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME));
+			GodotProfileCounter("Primitives", rendering_server->get_rendering_info(RenderingServer::RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME));
+			GodotProfileCounter("Objects Drawn", rendering_server->get_rendering_info(RenderingServer::RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME));
+			GodotProfileCounter("Video Memory (MB)", rendering_server->get_rendering_info(RenderingServer::RENDERING_INFO_VIDEO_MEM_USED) / 1048576.0);
+		}
+	}
+	// </ELIM>
+
+	// <ELIM> TURNT Insights: frame boundary fallback.
+	// RenderingServerDefault::_draw is the authoritative boundary, but the block
+	// above skips drawing entirely when no window can draw -- which is every
+	// iteration of a headless run. Without this a CPU-only capture would have no
+	// frame track. Does nothing when _draw already supplied a boundary.
+	TntInsights::iteration_boundary(Engine::get_singleton()->get_process_frames());
+	// </ELIM>
 
 #ifdef TOOLS_ENABLED
 	if (auto_build_solutions) {

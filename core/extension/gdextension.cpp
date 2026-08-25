@@ -34,6 +34,9 @@
 #include "core/config/project_settings.h"
 #include "core/object/class_db.h"
 #include "core/object/method_bind.h"
+// <ELIM> TURNT Insights native bridge, registered in initialize_gdextensions().
+#include "core/profiling/insights_native.h"
+// </ELIM>
 #include "gdextension_library_loader.h"
 #include "gdextension_manager.h"
 
@@ -818,6 +821,14 @@ GDExtension::~GDExtension() {
 
 void GDExtension::initialize_gdextensions() {
 	gdextension_setup_interface();
+
+	// <ELIM> TURNT Insights: lets libturnt emit into a capture without Variant marshalling or a ClassDB lookup.
+	// Registered unconditionally, including in builds with no Insights backend --
+	// get_interface_function() ERR_FAILs on an unknown name, so a conditional
+	// registration would print an error on every launch of such a build. The
+	// table it returns reports available == 0 there.
+	register_interface_function("tnt_insights_get_api_v1", (GDExtensionInterfaceFunctionPtr)&tnt_insights_get_api_v1);
+	// </ELIM>
 
 #ifndef DISABLE_DEPRECATED
 	register_interface_function("classdb_register_extension_class", (GDExtensionInterfaceFunctionPtr)&GDExtension::_register_extension_class);

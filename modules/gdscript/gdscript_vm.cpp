@@ -496,7 +496,10 @@ void (*type_init_function_table[])(Variant *) = {
 #define METHOD_CALL_ON_FREED_INSTANCE_ERROR(method_pointer) "Cannot call method '" + (method_pointer)->get_name() + "' on a previously freed instance."
 
 Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_args, int p_argcount, Callable::CallError &r_err, CallState *p_state) {
-	GodotProfileZoneScript(this, source, name, name, _initial_line);
+	// <ELIM> TURNT Insights: use the cached-location form so the source location is interned once per function rather than once per call.
+	// GodotProfileZoneScript(this, source, name, name, _initial_line);
+	GodotProfileZoneScriptCached(_profile_loc_id, this, source, name, name, _initial_line);
+	// </ELIM>
 
 	OPCODES_TABLE;
 

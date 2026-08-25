@@ -88,6 +88,18 @@ if env["profiler"]:
         env_perfetto.disable_warnings()
         env_perfetto.Prepend(CPPPATH=[str(profiler_path.absolute())])
         env_perfetto.add_source_files(env.core_sources, str((profiler_path / "perfetto.cc").absolute()))
+    # <ELIM> TURNT Insights: sources live in this directory and are already picked up by the *.cpp glob above, so there is nothing to add. It takes no external SDK, hence no profiler_path.
+    elif env["profiler"] == "turnt":
+        if env["profiler_path"]:
+            print("profiler_path is not used by the turnt profiler. Aborting.")
+            Exit(255)
+        if env["profiler_sample_callstack"]:
+            print("The turnt profiler does not support call stack sampling. Aborting.")
+            Exit(255)
+        if env["profiler_track_memory"]:
+            print("The turnt profiler does not support memory tracking. Aborting.")
+            Exit(255)
+    # </ELIM>
 elif env["profiler_path"]:
     print("profiler is required if profiler_path is set. Aborting.")
     Exit(255)

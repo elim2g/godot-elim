@@ -1613,6 +1613,12 @@ private:
 		TightLocalVector<uint64_t> timestamp_result_values;
 		uint32_t timestamp_result_count = 0;
 		uint64_t index = 0;
+		// <ELIM> TURNT Insights: the frame the timestamps in this slot were RECORDED in.
+		// `index` above is stamped at retrieval, which is frame_queue_size frames
+		// later, so it cannot be used to attribute GPU work to a frame.
+		uint64_t timestamp_record_index = 0;
+		uint64_t timestamp_result_record_index = 0;
+		// </ELIM>
 	};
 
 	uint32_t max_timestamp_query_elements = 0;
@@ -1678,6 +1684,13 @@ public:
 	void capture_timestamp(const String &p_name);
 	uint32_t get_captured_timestamps_count() const;
 	uint64_t get_captured_timestamps_frame() const;
+	// <ELIM> TURNT Insights: see Frame::timestamp_record_index.
+	uint64_t get_captured_timestamps_record_frame() const;
+	// Samples a (gpu, cpu) instant so the GPU clock can be mapped onto the CPU
+	// timeline. r_cpu_ticks is a raw performance-counter value. False when the
+	// driver cannot calibrate.
+	bool get_clock_calibration(uint64_t *r_gpu_nsec, uint64_t *r_cpu_ticks);
+	// </ELIM>
 	uint64_t get_captured_timestamp_gpu_time(uint32_t p_index) const;
 	uint64_t get_captured_timestamp_cpu_time(uint32_t p_index) const;
 	String get_captured_timestamp_name(uint32_t p_index) const;

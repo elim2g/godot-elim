@@ -202,11 +202,22 @@ opts.Add(BoolVariable("use_volk", "Use the volk library to load the Vulkan loade
 opts.Add(BoolVariable("accesskit", "Use AccessKit C SDK", True))
 opts.Add(("accesskit_sdk_path", "Path to the AccessKit C SDK", ""))
 opts.Add(BoolVariable("sdl", "Enable the SDL3 input driver", True))
+# <ELIM> TURNT Insights: "turnt" is a self-contained backend that writes a .tntinsight capture. Unlike the others it needs no profiler_path.
+# opts.Add(
+#     EnumVariable(
+#         "profiler", "Specify the profiler to use", "none", ["none", "tracy", "perfetto", "instruments"], ignorecase=2
+#     )
+# )
 opts.Add(
     EnumVariable(
-        "profiler", "Specify the profiler to use", "none", ["none", "tracy", "perfetto", "instruments"], ignorecase=2
+        "profiler",
+        "Specify the profiler to use",
+        "none",
+        ["none", "tracy", "perfetto", "instruments", "turnt"],
+        ignorecase=2,
     )
 )
+# </ELIM>
 opts.Add(("profiler_path", "Path to the Profiler framework.", ""))
 opts.Add(
     BoolVariable(

@@ -6716,6 +6716,9 @@ void RenderingDevice::_begin_frame(bool p_presented) {
 		driver->command_timestamp_query_pool_reset(frames[frame].command_buffer, frames[frame].timestamp_pool, frames[frame].timestamp_count);
 		SWAP(frames[frame].timestamp_names, frames[frame].timestamp_result_names);
 		SWAP(frames[frame].timestamp_cpu_values, frames[frame].timestamp_cpu_result_values);
+		// <ELIM> TURNT Insights: carry the recording frame across with the results.
+		frames[frame].timestamp_result_record_index = frames[frame].timestamp_record_index;
+		// </ELIM>
 	}
 
 	frames[frame].timestamp_result_count = frames[frame].timestamp_count;
@@ -7314,6 +7317,11 @@ void RenderingDevice::capture_timestamp(const String &p_name) {
 
 	draw_graph.add_capture_timestamp(frames[frame].timestamp_pool, frames[frame].timestamp_count);
 
+	// <ELIM> TURNT Insights: remember which frame this slot's timestamps belong to.
+	if (frames[frame].timestamp_count == 0) {
+		frames[frame].timestamp_record_index = Engine::get_singleton()->get_frames_drawn();
+	}
+	// </ELIM>
 	frames[frame].timestamp_names[frames[frame].timestamp_count] = p_name;
 	frames[frame].timestamp_cpu_values[frames[frame].timestamp_count] = OS::get_singleton()->get_ticks_usec();
 	frames[frame].timestamp_count++;
@@ -7444,6 +7452,23 @@ uint64_t RenderingDevice::get_captured_timestamps_frame() const {
 	ERR_RENDER_THREAD_GUARD_V(0);
 	return frames[frame].index;
 }
+
+// <ELIM> TURNT Insights: correct frame attribution and GPU/CPU clock calibration.
+uint64_t RenderingDevice::get_captured_timestamps_record_frame() const {
+	ERR_RENDER_THREAD_GUARD_V(0);
+	return frames[frame].timestamp_result_record_index;
+}
+
+bool RenderingDevice::get_clock_calibration(uint64_t *r_gpu_nsec, uint64_t *r_cpu_ticks) {
+	ERR_RENDER_THREAD_GUARD_V(false);
+	uint64_t gpu_ticks = 0;
+	if (!driver->timestamp_get_clock_calibration(&gpu_ticks, r_cpu_ticks)) {
+		return false;
+	}
+	*r_gpu_nsec = driver->timestamp_query_result_to_time(gpu_ticks);
+	return true;
+}
+// </ELIM>
 
 uint64_t RenderingDevice::get_captured_timestamp_gpu_time(uint32_t p_index) const {
 	ERR_RENDER_THREAD_GUARD_V(0);
