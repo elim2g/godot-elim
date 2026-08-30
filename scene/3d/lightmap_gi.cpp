@@ -1613,6 +1613,171 @@ static bool _surface_light_simplify_island(const LocalVector<SurfaceLightTri> &p
 // islands come out in whatever frame the input xforms are in. Used by both the
 // bake prepare path and the GDScript debug hook so the visualizer is exactly
 // faithful to the bake.
+// <ELIM> Convex-merge fallback for islands the boundary rebuild cannot handle.
+//
+// _surface_light_simplify_island is exact-or-nothing: a pinched boundary, a hole it
+// cannot bridge, or an area mismatch drops the island to EMIT_RAW_MEMBERS. Measured
+// on dfwc2017-6 (test/manual/diag_surface_light_complexity.gd), that is where the
+// triangle count actually lives — the raw-member islands hold over half the map's
+// polygon triangles, and the worst ships 695 triangles for a 63-corner face. The
+// bake charges 2 trace-equivalents per triangle, so this is bake throughput, not
+// just memory. Note the 512-vertex contour cap is NOT what binds (worst case
+// measured: 298) and the collinear epsilon is already doing its job — neither is
+// worth touching.
+//
+// This is the monotone fallback. It never rebuilds a global contour, so holes and
+// pinch vertices cannot defeat it: it grows maximal CONVEX regions out of the member
+// triangles and fans each one. If nothing merges it emits exactly the raw members,
+// so it can never be worse than the path it replaces.
+//
+// A region is accepted only when the convex hull of its accumulated vertices has the
+// same area as the sum of the member triangles inside it. That single test proves
+// convex, gap-free and non-overlapping simultaneously, so the emitted area is
+// preserved by construction rather than by a tolerance check after the fact.
+static constexpr uint32_t SURFACE_LIGHT_MERGE_MAX_REGION_VERTS = 64; // Bounds per-candidate hull cost.
+static constexpr double SURFACE_LIGHT_MERGE_AREA_REL_EPS = 1e-4;
+
+static bool _surface_light_convex_merge_island(const LocalVector<SurfaceLightTri> &p_tris,
+		const Vector3 &p_centroid, const Vector3 &p_t_axis, const Vector3 &p_b_axis,
+		const Vector3 &p_normal, LocalVector<Vector2> &r_tris_2d) {
+	using EdgeMap = HashMap<SurfaceLightEdgeKey, Vector2i, SurfaceLightEdgeKeyHasher>;
+
+	// Project into the island frame, winding-normalized CCW, dropping the same
+	// degenerate slivers the raw-member emit path drops.
+	LocalVector<Vector2> tv;
+	LocalVector<float> tri_area;
+	LocalVector<uint32_t> src_index;
+	for (uint32_t m = 0; m < p_tris.size(); m++) {
+		const SurfaceLightTri &tri = p_tris[m];
+		if (tri.area < SURFACE_LIGHT_MIN_AREA) {
+			continue;
+		}
+		const bool flip = (tri.v[1] - tri.v[0]).cross(tri.v[2] - tri.v[0]).dot(p_normal) < 0.0f;
+		const Vector3 src[3] = { tri.v[0], flip ? tri.v[2] : tri.v[1], flip ? tri.v[1] : tri.v[2] };
+		for (int k = 0; k < 3; k++) {
+			const Vector3 rel = src[k] - p_centroid;
+			tv.push_back(Vector2(rel.dot(p_t_axis), rel.dot(p_b_axis)));
+		}
+		tri_area.push_back(tri.area);
+		src_index.push_back(m);
+	}
+
+	const uint32_t n = tri_area.size();
+	if (n < 2) {
+		return false;
+	}
+
+	// Edge -> the (up to two) member triangles carrying it, at the same weld
+	// granularity the island was built with.
+	EdgeMap edge_tris;
+	for (uint32_t t = 0; t < n; t++) {
+		const SurfaceLightTri &tri = p_tris[src_index[t]];
+		for (int k = 0; k < 3; k++) {
+			const SurfaceLightEdgeKey ek = _surface_light_edge_key(tri.v[k], tri.v[(k + 1) % 3]);
+			EdgeMap::Iterator it = edge_tris.find(ek);
+			if (it == edge_tris.end()) {
+				edge_tris.insert(ek, Vector2i((int)t, -1));
+			} else if (it->value.y < 0) {
+				it->value.y = (int)t;
+			}
+		}
+	}
+
+	LocalVector<bool> used;
+	used.resize(n);
+	for (uint32_t i = 0; i < n; i++) {
+		used[i] = false;
+	}
+
+	r_tris_2d.clear();
+	uint32_t emitted_tris = 0;
+	LocalVector<uint32_t> frontier;
+	Vector<Point2> cand;
+
+	for (uint32_t seed = 0; seed < n; seed++) {
+		if (used[seed]) {
+			continue;
+		}
+		used[seed] = true;
+
+		// Region state: its convex hull (CCW, last == first, matching
+		// Geometry2D::convex_hull) plus the summed area of its members.
+		Vector<Point2> hull;
+		hull.resize(4);
+		hull.write[0] = tv[seed * 3 + 0];
+		hull.write[1] = tv[seed * 3 + 1];
+		hull.write[2] = tv[seed * 3 + 2];
+		hull.write[3] = tv[seed * 3 + 0];
+		double region_area = (double)tri_area[seed];
+
+		frontier.clear();
+		frontier.push_back(seed);
+
+		while (!frontier.is_empty()) {
+			const uint32_t cur = frontier[frontier.size() - 1];
+			frontier.resize(frontier.size() - 1);
+
+			const SurfaceLightTri &cur_tri = p_tris[src_index[cur]];
+			for (int k = 0; k < 3; k++) {
+				EdgeMap::Iterator it = edge_tris.find(_surface_light_edge_key(cur_tri.v[k], cur_tri.v[(k + 1) % 3]));
+				if (it == edge_tris.end()) {
+					continue;
+				}
+				for (int slot = 0; slot < 2; slot++) {
+					const int cand_t = (slot == 0) ? it->value.x : it->value.y;
+					if (cand_t < 0 || used[(uint32_t)cand_t]) {
+						continue;
+					}
+					if ((uint32_t)(hull.size() - 1) >= SURFACE_LIGHT_MERGE_MAX_REGION_VERTS) {
+						continue;
+					}
+
+					cand.resize(0);
+					for (int h = 0; h < hull.size() - 1; h++) {
+						cand.push_back(hull[h]);
+					}
+					for (int kk = 0; kk < 3; kk++) {
+						cand.push_back(tv[(uint32_t)cand_t * 3 + kk]);
+					}
+
+					const Vector<Point2> merged = Geometry2D::convex_hull(cand);
+					const int mn = merged.size() - 1;
+					if (mn < 3) {
+						continue;
+					}
+					double merged_area = 0.0;
+					for (int h = 0; h < mn; h++) {
+						merged_area += 0.5 * (double)merged[h].cross(merged[h + 1]);
+					}
+					const double want = region_area + (double)tri_area[cand_t];
+					if (Math::abs(merged_area - want) > want * SURFACE_LIGHT_MERGE_AREA_REL_EPS) {
+						continue; // Union is not exactly the hull: concave, gapped or overlapping.
+					}
+
+					used[(uint32_t)cand_t] = true;
+					hull = merged;
+					region_area = want;
+					frontier.push_back((uint32_t)cand_t);
+				}
+			}
+		}
+
+		// convex_hull is CCW in this frame, so the fan is wound along the island
+		// normal like every other emit path.
+		const int hn = hull.size() - 1;
+		for (int h = 1; h < hn - 1; h++) {
+			r_tris_2d.push_back(hull[0]);
+			r_tris_2d.push_back(hull[h]);
+			r_tris_2d.push_back(hull[h + 1]);
+			emitted_tris++;
+		}
+	}
+
+	// Only worth taking if it actually reduced the count; equal means nothing merged.
+	return emitted_tris > 0 && emitted_tris < n;
+}
+// </ELIM>
+
 static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &p_inputs, float p_pos_bias, Vector<SurfaceLightIslandLight> &r_islands, bool p_capture_geometry = false) {
 	// PHASE 1: gather emitter triangles per surface, merge into coplanar islands, and
 	// accumulate the map-wide emissive area (drives the adaptive tile size below). Solid
@@ -1786,6 +1951,9 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 	uint32_t simplify_failed_islands = 0;
 	uint32_t simplified_tris_in = 0;
 	uint32_t simplified_tris_out = 0;
+	uint32_t merged_islands = 0;
+	uint32_t merged_tris_in = 0;
+	uint32_t merged_tris_out = 0;
 
 	for (uint32_t ci = 0; ci < islands.size(); ci++) {
 		const SurfaceLightIsland &isl = islands[ci];
@@ -1871,6 +2039,15 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 				simplified_tris_out += (uint32_t)(simple_tris_2d.size() / 3);
 			} else {
 				simplify_failed_islands++;
+				// <ELIM> Boundary rebuild bailed. Fall to the monotone convex
+				// merge rather than straight to raw member triangles.
+				simplified = _surface_light_convex_merge_island(isl.tris, island_centroid, t_axis, b_axis, cnormal, simple_tris_2d);
+				if (simplified) {
+					merged_islands++;
+					merged_tris_in += isl.tris.size();
+					merged_tris_out += (uint32_t)(simple_tris_2d.size() / 3);
+				}
+				// </ELIM>
 			}
 		}
 		const uint32_t emit_tri_count = simplified ? (uint32_t)(simple_tris_2d.size() / 3) : isl.tris.size();
@@ -1962,6 +2139,13 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 				(int)r_islands.size(), total_area, (int)total_poly_verts, (int)hull_fallback_islands, (int)occluded_islands));
 		print_line(vformat("LightmapGI: surface-light simplification — %d non-convex island(s) rebuilt from their boundary (%d member tri(s) -> %d exact tri(s)), %d could not be rebuilt.",
 				(int)simplified_islands, (int)simplified_tris_in, (int)simplified_tris_out, (int)simplify_failed_islands));
+		// <ELIM> Convex-merge rescue of the islands the boundary rebuild bailed on.
+		if (simplify_failed_islands > 0) {
+			print_line(vformat("LightmapGI: surface-light convex merge — %d of %d un-rebuildable island(s) merged into convex regions (%d member tri(s) -> %d fan tri(s)); %d still emit raw members.",
+					(int)merged_islands, (int)simplify_failed_islands, (int)merged_tris_in, (int)merged_tris_out,
+					(int)(simplify_failed_islands - merged_islands)));
+		}
+		// </ELIM>
 		if (hull_fallback_islands > 0) {
 			WARN_PRINT(vformat("LightmapGI: %d emitter island(s) still exceed %d triangles after boundary simplification and fell back to their convex hull — power-conserving, but the light is smeared over non-emissive geometry and the emitter itself is dimmed by island_area/hull_area. Raise SURFACE_LIGHT_MAX_POLY_TRIS.", (int)hull_fallback_islands, (int)SURFACE_LIGHT_MAX_POLY_TRIS));
 		}
