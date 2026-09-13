@@ -461,7 +461,12 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 	// Compute size.
 	half size = half(0.0);
-	if (sc_use_light_soft_shadows() && omni_lights.data[idx].size > 0.0) {
+	// <ELIM> An emitter proxy's size widens the GGX lobe at the call site; it must
+	// never feed this cosine offset, which lights coplanar and grazing surfaces
+	// as if they faced the lamp (a view-independent blob at the lamp position).
+	// if (sc_use_light_soft_shadows() && omni_lights.data[idx].size > 0.0) {
+	if (sc_use_light_soft_shadows() && omni_lights.data[idx].size > 0.0 && omni_lights.data[idx].bake_mode != LIGHT_BAKE_STATIC_SPECULAR) {
+	// </ELIM>
 		half t = half(omni_lights.data[idx].size / max(0.001, light_length));
 		size = half(1.0) / sqrt(half(1.0) + t * t);
 		size = max(half(1.0) - size, half(0.0));
@@ -767,7 +772,12 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 	// Compute size.
 	half size = half(0.0);
-	if (sc_use_light_soft_shadows() && spot_lights.data[idx].size > 0.0) {
+	// <ELIM> An emitter proxy's size widens the GGX lobe at the call site; it must
+	// never feed this cosine offset, which lights coplanar and grazing surfaces
+	// as if they faced the lamp (a view-independent blob at the lamp position).
+	// if (sc_use_light_soft_shadows() && spot_lights.data[idx].size > 0.0) {
+	if (sc_use_light_soft_shadows() && spot_lights.data[idx].size > 0.0 && spot_lights.data[idx].bake_mode != LIGHT_BAKE_STATIC_SPECULAR) {
+	// </ELIM>
 		half t = half(spot_lights.data[idx].size / max(0.001, light_length));
 		size = half(1.0) / sqrt(half(1.0) + t * t);
 		size = max(half(1.0) - size, half(0.0));

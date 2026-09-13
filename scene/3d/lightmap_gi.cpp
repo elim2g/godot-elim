@@ -294,6 +294,16 @@ void LightmapGIData::_set_probe_data(const Dictionary &p_data) {
 	set_capture_data(p_data["bounds"], p_data["interior"], p_data["points"], p_data["sh"], p_data["tetrahedra"], p_data["bsp"], p_data["baked_exposure"], phash);
 }
 
+// <ELIM>
+void LightmapGIData::set_surface_lights(const Array &p_lights) {
+	surface_lights = p_lights;
+}
+
+Array LightmapGIData::get_surface_lights() const {
+	return surface_lights;
+}
+// </ELIM>
+
 Dictionary LightmapGIData::_get_probe_data() const {
 	Dictionary d;
 	d["bounds"] = get_capture_bounds();
@@ -358,12 +368,19 @@ void LightmapGIData::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("_set_probe_data", "data"), &LightmapGIData::_set_probe_data);
 	ClassDB::bind_method(D_METHOD("_get_probe_data"), &LightmapGIData::_get_probe_data);
+	// <ELIM>
+	ClassDB::bind_method(D_METHOD("set_surface_lights", "lights"), &LightmapGIData::set_surface_lights);
+	ClassDB::bind_method(D_METHOD("get_surface_lights"), &LightmapGIData::get_surface_lights);
+	// </ELIM>
 
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "lightmap_textures", PROPERTY_HINT_ARRAY_TYPE, "TextureLayered", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_READ_ONLY), "set_lightmap_textures", "get_lightmap_textures");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "shadowmask_textures", PROPERTY_HINT_ARRAY_TYPE, "TextureLayered", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_READ_ONLY), "set_shadowmask_textures", "get_shadowmask_textures");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "uses_spherical_harmonics", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_uses_spherical_harmonics", "is_using_spherical_harmonics");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "user_data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_user_data", "_get_user_data");
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "probe_data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_probe_data", "_get_probe_data");
+	// <ELIM>
+	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "surface_lights", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_surface_lights", "get_surface_lights");
+	// </ELIM>
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "_uses_packed_directional", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_uses_packed_directional", "_is_using_packed_directional");
 
 #ifndef DISABLE_DEPRECATED
@@ -509,7 +526,11 @@ void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &m
 
 	Light3D *light = Object::cast_to<Light3D>(p_at_node);
 
-	if (light && light->get_bake_mode() != Light3D::BAKE_DISABLED) {
+	// <ELIM> A BAKE_STATIC_SPECULAR proxy stands in for an emitter island the bake
+	// already integrates analytically; gathering it would bake the emitter twice.
+	// if (light && light->get_bake_mode() != Light3D::BAKE_DISABLED) {
+	if (light && light->get_bake_mode() != Light3D::BAKE_DISABLED && light->get_bake_mode() != Light3D::BAKE_STATIC_SPECULAR) {
+	// </ELIM>
 		LightsFound lf;
 		lf.xform = get_global_transform().affine_inverse() * light->get_global_transform();
 		lf.light = light;
@@ -2433,6 +2454,23 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 			}
 			_collect_surface_light_patches(sl_inputs, MAX(0.01f, bias), surface_light_islands);
 		}
+		// Persist the emitting islands so the runtime can stand a specular proxy per
+		// island without re-running the collector. energy folds radiance_scale in, so it
+		// is the analytic light's effective energy; frame is the lightmapper's (GI-local).
+		r_state.surface_lights.clear();
+		for (const SurfaceLightIslandLight &sl : surface_light_islands) {
+			if (sl.occluded) {
+				continue;
+			}
+			Dictionary d;
+			d["position"] = sl.pos;
+			d["normal"] = sl.normal;
+			d["color"] = sl.color;
+			d["energy"] = sl.energy * sl.radiance_scale;
+			d["area"] = sl.area;
+			d["radius"] = sl.bounding_radius;
+			r_state.surface_lights.push_back(d);
+		}
 		// </ELIM>
 	}
 
@@ -2914,6 +2952,9 @@ LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Li
 		gi_data->set_capture_data(bounds, interior, Vector<Vector3>(probe_points), Vector<Color>(probe_sh), gi_data->get_capture_tetrahedra(), gi_data->get_capture_bsp_tree(), exposure_normalization, bake_probe_hash);
 	}
 
+	// <ELIM> Emitter islands for runtime specular proxies.
+	gi_data->set_surface_lights(p_state.surface_lights);
+	// </ELIM>
 	gi_data->set_path(p_image_data_path, true);
 	Error err = ResourceSaver::save(gi_data);
 

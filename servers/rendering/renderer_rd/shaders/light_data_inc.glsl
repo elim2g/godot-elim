@@ -1,6 +1,9 @@
 #define LIGHT_BAKE_DISABLED 0
 #define LIGHT_BAKE_STATIC 1
 #define LIGHT_BAKE_DYNAMIC 2
+// <ELIM> Emitter specular proxy, see claude-docs/EMITTER_SPECULAR_LIGHTS.md.
+#define LIGHT_BAKE_STATIC_SPECULAR 3
+// </ELIM>
 
 struct LightData { //this structure needs to be as packed as possible
 	vec3 position;

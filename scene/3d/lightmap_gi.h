@@ -65,6 +65,13 @@ private:
 
 	bool _uses_packed_directional = false;
 
+	// <ELIM> Emitter islands the bake integrated as area lights, one Dictionary each
+	// (position/normal in the LightmapGI frame, linear color, energy, area, radius).
+	// The runtime stands a specular-only proxy light per island from this list. See
+	// claude-docs/EMITTER_SPECULAR_LIGHTS.md.
+	Array surface_lights;
+	// </ELIM>
+
 	RID lightmap;
 	AABB bounds;
 	float baked_exposure = 1.0;
@@ -127,6 +134,11 @@ public:
 	uint32_t get_lightprobe_hash() const;
 
 	AABB get_capture_bounds() const;
+
+	// <ELIM>
+	void set_surface_lights(const Array &p_lights);
+	Array get_surface_lights() const;
+	// </ELIM>
 
 	void clear();
 
@@ -226,6 +238,8 @@ private:
 		Basis environment_transform;
 		float exposure_normalization = 1.0;
 		Lightmapper::BakeError gpu_err = Lightmapper::BAKE_OK;
+		// Emitter islands collected by prepare, written to the LightmapGIData by finalize.
+		Array surface_lights;
 	};
 	BakeState *pending_bake = nullptr;
 	// </ELIM>

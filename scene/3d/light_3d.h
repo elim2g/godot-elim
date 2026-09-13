@@ -65,6 +65,9 @@ public:
 		BAKE_DISABLED,
 		BAKE_STATIC,
 		BAKE_DYNAMIC,
+		// <ELIM> See RS::LIGHT_BAKE_STATIC_SPECULAR.
+		BAKE_STATIC_SPECULAR,
+		// </ELIM>
 	};
 
 private:

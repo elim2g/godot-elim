@@ -581,6 +581,12 @@ public:
 		LIGHT_BAKE_DISABLED,
 		LIGHT_BAKE_STATIC,
 		LIGHT_BAKE_DYNAMIC,
+		// <ELIM> Runtime proxy for a baked emitter: the lightmapper skips it (the
+		// emitter's diffuse is already in the atlas), lightmapped geometry keeps only
+		// its specular, dynamic geometry gets the full light. Omni/spot only. See
+		// claude-docs/EMITTER_SPECULAR_LIGHTS.md.
+		LIGHT_BAKE_STATIC_SPECULAR,
+		// </ELIM>
 	};
 
 	virtual void light_set_bake_mode(RID p_light, LightBakeMode p_bake_mode) = 0;
