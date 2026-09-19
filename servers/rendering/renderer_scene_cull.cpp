@@ -32,6 +32,9 @@
 
 #include "core/config/project_settings.h"
 #include "core/object/worker_thread_pool.h"
+// <ELIM>
+#include "core/profiling/profiling.h"
+// </ELIM>
 #include "rendering_light_culler.h"
 #include "rendering_server_default.h"
 
@@ -2131,7 +2134,10 @@ void RendererSceneCull::_update_instance_lightmap_captures(Instance *p_instance)
 	geom->geometry_instance->set_lightmap_capture(p_instance->lightmap_sh.ptr());
 }
 
-void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect) {
+// <ELIM>
+// void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect) {
+void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_index, Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, real_t p_visible_depth) {
+// </ELIM>
 	// For later tight culling, the light culler needs to know the details of the directional light.
 	light_culler->prepare_directional_light(p_instance, p_shadow_index);
 
@@ -2145,6 +2151,13 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 	if (shadow_max > 0 && !p_cam_orthogonal) { //its impractical (and leads to unwanted behaviors) to set max distance in orthogonal camera
 		max_distance = MIN(shadow_max, max_distance);
 	}
+	// <ELIM> Nothing beyond the farthest visible receiver can show a shadow, so
+	// the cascades stop there instead of at shadow_max_distance. Casters between
+	// the light and that slice are still kept by the z_max/pancake extension.
+	if (p_visible_depth > 0 && !p_cam_orthogonal) {
+		max_distance = MIN(max_distance, p_visible_depth);
+	}
+	// </ELIM>
 	max_distance = MAX(max_distance, p_cam_projection.get_z_near() + 0.001);
 	real_t min_distance = MIN(p_cam_projection.get_z_near(), max_distance);
 
@@ -2825,6 +2838,10 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 	Transform3D inv_cam_transform = cull_data.cam_transform.inverse();
 	float z_near = cull_data.camera_matrix->get_z_near();
 	bool is_orthogonal = cull_data.camera_matrix->is_orthogonal();
+	// <ELIM>
+	const Vector3 cam_fwd = -cull_data.cam_transform.basis.get_column(2);
+	const real_t cam_depth0 = cam_fwd.dot(cull_data.cam_transform.origin);
+	// </ELIM>
 
 	for (uint64_t i = p_from; i < p_to; i++) {
 		bool mesh_visible = false;
@@ -2842,7 +2859,10 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 #define OCCLUSION_CULLED (cull_data.occlusion_buffer != nullptr && (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_OCCLUSION_CULLING) == 0 && cull_data.occlusion_buffer->is_occluded(cull_data.scenario->instance_aabbs[i].bounds, cull_data.cam_transform.origin, inv_cam_transform, *cull_data.camera_matrix, z_near, is_orthogonal, cull_data.scenario->instance_data[i].occlusion_timeout))
 
 		if (!HIDDEN_BY_VISIBILITY_CHECKS) {
-			if ((LAYER_CHECK && IN_FRUSTUM(cull_data.cull->frustum) && VIS_CHECK && !OCCLUSION_CULLED) || (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_ALL_CULLING)) {
+			// <ELIM>
+			// if ((LAYER_CHECK && IN_FRUSTUM(cull_data.cull->frustum) && VIS_CHECK && !OCCLUSION_CULLED) || (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_ALL_CULLING)) {
+			if (cull_data.cull_camera && ((LAYER_CHECK && IN_FRUSTUM(cull_data.cull->frustum) && VIS_CHECK && !OCCLUSION_CULLED) || (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_ALL_CULLING))) {
+			// </ELIM>
 				uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 				if (base_type == RS::INSTANCE_LIGHT) {
 					cull_result.lights.push_back(idata.instance);
@@ -3037,11 +3057,19 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 
 					if (keep) {
 						cull_result.geometry_instances.push_back(idata.instance_geometry);
+						// <ELIM> Support point of the AABB along the view axis.
+						const real_t *b = cull_data.scenario->instance_aabbs[i].bounds;
+						const Vector3 support(b[cam_fwd.x > 0.0f ? 3 : 0], b[cam_fwd.y > 0.0f ? 4 : 1], b[cam_fwd.z > 0.0f ? 5 : 2]);
+						cull_result.max_visible_depth = MAX(cull_result.max_visible_depth, cam_fwd.dot(support) - cam_depth0);
+						// </ELIM>
 					}
 				}
 			}
 
-			for (uint32_t j = 0; j < cull_data.cull->shadow_count; j++) {
+			// <ELIM>
+			// for (uint32_t j = 0; j < cull_data.cull->shadow_count; j++) {
+			for (uint32_t j = 0; cull_data.cull_cascades && j < cull_data.cull->shadow_count; j++) {
+			// </ELIM>
 				if (!light_culler->cull_directional_light(cull_data.scenario->instance_aabbs[i], j)) {
 					continue;
 				}
@@ -3066,7 +3094,10 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 #undef VIS_CHECK
 #undef OCCLUSION_CULLED
 
-		for (uint32_t j = 0; j < cull_data.cull->sdfgi.region_count; j++) {
+		// <ELIM>
+		// for (uint32_t j = 0; j < cull_data.cull->sdfgi.region_count; j++) {
+		for (uint32_t j = 0; cull_data.cull_camera && j < cull_data.cull->sdfgi.region_count; j++) {
+		// </ELIM>
 			if (cull_data.scenario->instance_aabbs[i].in_aabb(cull_data.cull->sdfgi.region_aabb[j])) {
 				uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 
@@ -3118,6 +3149,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		scene_render->sdfgi_update(p_render_buffers, p_environment, camera_position); //update conditions for SDFGI (whether its used or not)
 	}
 
+	// <ELIM> TURNT Insights: phase zones so "render viewport" is not one opaque span.
+	GodotProfileZoneGroupedFirst(_profile_zone, "scene: visibility cull");
+	// </ELIM>
 	RENDER_TIMESTAMP("Update Visibility Dependencies");
 
 	if (scenario->instance_visibility.get_bin_count() > 0) {
@@ -3147,6 +3181,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		}
 	}
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "scene: directional shadow setup");
+	// </ELIM>
 	RENDER_TIMESTAMP("Cull 3D Scene");
 
 	//rasterizer->set_camera(p_camera_data->main_transform, p_camera_data.main_projection, p_camera_data.is_orthogonal);
@@ -3157,11 +3194,16 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	cull.frustum = Frustum(planes);
 
 	Vector<RID> directional_lights;
+	// <ELIM> Hoisted: the shadow setup now runs after the camera cull pass.
+	Vector<Instance *> lights_with_shadow;
+	// </ELIM>
 	// directional lights
 	{
 		cull.shadow_count = 0;
 
-		Vector<Instance *> lights_with_shadow;
+		// <ELIM>
+		// Vector<Instance *> lights_with_shadow;
+		// </ELIM>
 
 		for (Instance *E : scenario->directional_lights) {
 			if (!E->visible || !(E->layer_mask & p_visible_layers)) {
@@ -3185,11 +3227,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 		}
 
-		RSG::light_storage->set_directional_shadow_count(lights_with_shadow.size());
-
-		for (int i = 0; i < lights_with_shadow.size(); i++) {
-			_light_instance_setup_directional_shadow(i, lights_with_shadow[i], p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect);
-		}
+		// <ELIM> Moved below the camera cull pass (needs the visible depth bound).
+		// RSG::light_storage->set_directional_shadow_count(lights_with_shadow.size());
+		//
+		// for (int i = 0; i < lights_with_shadow.size(); i++) {
+		// 	_light_instance_setup_directional_shadow(i, lights_with_shadow[i], p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect);
+		// }
+		// </ELIM>
 	}
 
 	{ //sdfgi
@@ -3239,24 +3283,55 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 #ifdef DEBUG_CULL_TIME
 		uint64_t time_from = OS::get_singleton()->get_ticks_usec();
 #endif
+		// <ELIM>
+		GodotProfileZoneGrouped(_profile_zone, "scene: frustum cull");
+		// </ELIM>
 
-		if (cull_to > thread_cull_threshold) {
-			//multiple threads
-			for (InstanceCullResult &thread : scene_cull_result_threads) {
-				thread.clear();
+		// <ELIM> Two-pass cull. Pass 1 (camera) yields max_visible_depth, which
+		// bounds the directional cascade range; pass 2 culls casters against the
+		// cascades fit to that range. Pass 2 revisits every AABB (~microseconds)
+		// and removes the caster draws behind the visible walls.
+		auto run_cull = [&]() {
+			if (cull_to > thread_cull_threshold) {
+				//multiple threads
+				for (InstanceCullResult &thread : scene_cull_result_threads) {
+					thread.clear();
+				}
+
+				WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &RendererSceneCull::_scene_cull_threaded, &cull_data, scene_cull_result_threads.size(), -1, true, SNAME("RenderCullInstances"));
+				WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_task);
+
+				for (InstanceCullResult &thread : scene_cull_result_threads) {
+					scene_cull_result.append_from(thread);
+				}
+
+			} else {
+				//single threaded
+				_scene_cull(cull_data, scene_cull_result, cull_from, cull_to);
+			}
+		};
+
+		cull_data.cull_camera = true;
+		cull_data.cull_cascades = false;
+		run_cull();
+
+		RSG::light_storage->set_directional_shadow_count(lights_with_shadow.size());
+		if (lights_with_shadow.size() > 0) {
+			// 2% + 1 unit of slack over the AABB bound so the last slice is not razor-thin.
+			const real_t visible_depth = scene_cull_result.max_visible_depth > 0.0 ? (scene_cull_result.max_visible_depth * 1.02 + 1.0) : 0.0;
+			if (p_viewport.is_valid()) {
+				GodotProfileCounter("Shadow Depth Bound (u)", visible_depth);
+				GodotProfileCounter("Shadow Max Distance (u)", RSG::light_storage->light_get_param(lights_with_shadow[0]->base, RS::LIGHT_PARAM_SHADOW_MAX_DISTANCE));
+			}
+			for (int i = 0; i < lights_with_shadow.size(); i++) {
+				_light_instance_setup_directional_shadow(i, lights_with_shadow[i], p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect, visible_depth);
 			}
 
-			WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &RendererSceneCull::_scene_cull_threaded, &cull_data, scene_cull_result_threads.size(), -1, true, SNAME("RenderCullInstances"));
-			WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_task);
-
-			for (InstanceCullResult &thread : scene_cull_result_threads) {
-				scene_cull_result.append_from(thread);
-			}
-
-		} else {
-			//single threaded
-			_scene_cull(cull_data, scene_cull_result, cull_from, cull_to);
+			cull_data.cull_camera = false;
+			cull_data.cull_cascades = true;
+			run_cull();
 		}
+		// </ELIM>
 
 #ifdef DEBUG_CULL_TIME
 		static float time_avg = 0;
@@ -3278,6 +3353,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	max_shadows_used = 0;
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "scene: shadow setup");
+	// </ELIM>
 	if (p_using_shadows) { //setup shadow maps
 
 		// Directional Shadows
@@ -3483,6 +3561,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		prev_camera_data = RSG::viewport->viewport_get_prev_camera_data(p_viewport);
 	}
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "scene: render");
+	// </ELIM>
 	RENDER_TIMESTAMP("Render 3D Scene");
 	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, &sdfgi_update_data, r_render_info);
 

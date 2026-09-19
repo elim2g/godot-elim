@@ -237,20 +237,39 @@ bool TntInsights::gpu_marker_allowed(const String &p_name) {
 		return true;
 	}
 	// The passes worth a row when the goal is "where did the frame go", rather
-	// than every dispatch in the renderer.
+	// than every dispatch in the renderer. A flat marker's span runs until the
+	// next recorded marker, so every pass that can cost real time must be kept:
+	// a dropped marker silently folds its pass into whichever kept pass
+	// preceded it (SSIL used to land inside "Process SSAO").
 	static const char *kept[] = {
 		"Frame Begin",
 		"Prepare Render Frame",
 		"Cull 3D Scene",
+		"Render OmniLight Shadows",
 		"Render Shadows",
+		"Prepare 3D Scene",
+		"Setup 3D Scene",
+		"Pack 3D Cluster Elements",
+		"Render 3D Cluster Elements",
 		"Render Depth Pre-Pass",
-		"Render Opaque Pass",
-		"Render Sky",
-		"Render 3D Transparent Pass",
-		"Render CanvasItems",
+		"Resolve Depth Pre-Pass (MSAA)",
+		"Prepare Depth for SSAO/SSIL",
 		"Process SSAO",
-		"Tonemap",
+		"Process SSIL",
+		"Process SSR",
+		"Render Opaque Pass",
+		"Render Motion Pass",
+		"Render Sky",
 		"Resolve MSAA",
+		"Copy Screen Texture",
+		"Copy Depth Texture",
+		"Render 3D Transparent Pass",
+		"Resolve",
+		"TAA",
+		"Glow",
+		"Tonemap",
+		"SMAA",
+		"Render CanvasItems",
 		nullptr,
 	};
 	for (uint32_t i = 0; kept[i] != nullptr; i++) {

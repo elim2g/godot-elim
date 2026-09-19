@@ -30,6 +30,9 @@
 
 #include "render_forward_clustered.h"
 #include "core/config/project_settings.h"
+// <ELIM>
+#include "core/profiling/profiling.h"
+// </ELIM>
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -1871,6 +1874,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	RD::get_singleton()->draw_command_begin_label("Render Setup");
 
+	// <ELIM> TURNT Insights: phase zones for the CPU side of the Forward+ frame.
+	GodotProfileZoneGroupedFirst(_profile_zone, "fwd: setup");
+	// </ELIM>
 	_setup_lightmaps(p_render_data, *p_render_data->lightmaps, p_render_data->scene_data->cam_transform);
 	_setup_voxelgis(*p_render_data->voxel_gi_instances);
 	_setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, false);
@@ -1878,10 +1884,16 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// May have changed due to the above (light buffer enlarged, as an example).
 	_update_render_base_uniform_set();
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "fwd: fill+sort render lists");
+	// </ELIM>
 	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi, using_motion_pass);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "fwd: pre-pass setup");
+	// </ELIM>
 
 	int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RS::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
 	_fill_instance_data(RENDER_LIST_OPAQUE, render_info);
@@ -2100,6 +2112,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			_post_prepass_render(p_render_data, using_sdfgi || using_voxelgi);
 		}
 
+		// <ELIM>
+		GodotProfileZoneGrouped(_profile_zone, "fwd: depth pre-pass");
+		// </ELIM>
 		RD::get_singleton()->draw_command_begin_label("Render Depth Pre-Pass");
 
 		RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, RID(), samplers);
@@ -2147,8 +2162,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			normal_roughness_views[v] = rb_data->get_normal_roughness(v);
 		}
 	}
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "fwd: pre-opaque (shadows/ssao/ssil)");
+	// </ELIM>
 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sdfgi || using_voxelgi, normal_roughness_views, rb_data.is_valid() && rb_data->has_voxelgi() ? rb_data->get_voxelgi() : RID());
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "fwd: opaque+sky pass");
+	// </ELIM>
 	RENDER_TIMESTAMP("Render Opaque Pass");
 
 	RD::get_singleton()->draw_command_begin_label("Render Opaque Pass");
@@ -2374,6 +2395,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	RENDER_TIMESTAMP("Render 3D Transparent Pass");
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "fwd: transparent pass");
+	// </ELIM>
 	RD::get_singleton()->draw_command_begin_label("Render 3D Transparent Pass");
 
 	rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, radiance_texture, samplers, true);
@@ -2506,6 +2530,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		}
 	}
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "fwd: post-process");
+	// </ELIM>
 	if (rb_data.is_valid()) {
 		_debug_draw_cluster(rb);
 
@@ -2571,6 +2598,9 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 
 	ERR_FAIL_COND(!light_storage->owns_light_instance(p_light));
 
+	// <ELIM>
+	GodotProfileZone("fwd: shadow pass");
+	// </ELIM>
 	RID base = light_storage->light_instance_get_base_light(p_light);
 
 	Rect2i atlas_rect;
