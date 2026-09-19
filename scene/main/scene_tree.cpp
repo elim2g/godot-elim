@@ -31,6 +31,10 @@
 #include "scene_tree.h"
 
 #include "core/config/project_settings.h"
+// <ELIM>
+#include "core/profiling/insights_singleton.h"
+#include "core/profiling/profiling.h"
+// </ELIM>
 #include "core/input/input.h"
 #include "core/io/image_loader.h"
 #include "core/io/resource_loader.h"
@@ -699,14 +703,26 @@ bool SceneTree::process(double p_time) {
 		}
 	}
 
+	// <ELIM> TURNT Insights: phase zones for the frame's non-node work.
+	GodotProfileZoneGroupedFirst(_profile_zone, "tree: process_frame signal");
+	// </ELIM>
 	emit_signal(SNAME("process_frame"));
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "tree: msgq + xform flush");
+	// </ELIM>
 	MessageQueue::get_singleton()->flush(); //small little hack
 
 	flush_transform_notifications();
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "tree: node process");
+	// </ELIM>
 	_process(false);
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "tree: ugc + msgq + xform flush");
+	// </ELIM>
 	_flush_ugc();
 	MessageQueue::get_singleton()->flush(); //small little hack
 	flush_transform_notifications(); //transforms after world update, to avoid unnecessary enter/exit notifications
@@ -715,11 +731,17 @@ bool SceneTree::process(double p_time) {
 		_flush_scene_change();
 	}
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "tree: timers + tweens");
+	// </ELIM>
 	process_timers(p_time, false); //go through timers
 	process_tweens(p_time, false);
 
 	flush_transform_notifications(); // Additional transforms after timers update.
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "tree: delete queue + idle callbacks");
+	// </ELIM>
 	// This should happen last because any processing that deletes something beforehand might expect the object to be removed in the same frame.
 	_flush_delete_queue();
 
@@ -1177,6 +1199,12 @@ void SceneTree::_process_group(ProcessGroup *p_group, bool p_physics) {
 	uint32_t node_count = nodes_copy.size();
 	Node **nodes_ptr = (Node **)nodes_copy.ptr(); // Force cast, pointer will not change.
 
+	// <ELIM> TURNT Insights: one zone per node class while a capture is armed, so
+	// C++ nodes' process time is attributable (script nodes already zone themselves).
+	TntInsights *insights = TntInsights::get_singleton();
+	const bool zone_nodes = insights != nullptr && insights->is_capturing();
+	// </ELIM>
+
 	for (uint32_t i = 0; i < node_count; i++) {
 		Node *n = nodes_ptr[i];
 		if (nodes_removed_on_group_call.has(n)) {
@@ -1189,6 +1217,11 @@ void SceneTree::_process_group(ProcessGroup *p_group, bool p_physics) {
 			continue;
 		}
 
+		// <ELIM>
+		if (zone_nodes) {
+			insights->begin_zone(n->get_class());
+		}
+		// </ELIM>
 		if (p_physics) {
 			if (n->is_physics_processing_internal()) {
 				n->notification(Node::NOTIFICATION_INTERNAL_PHYSICS_PROCESS);
@@ -1204,6 +1237,11 @@ void SceneTree::_process_group(ProcessGroup *p_group, bool p_physics) {
 				n->notification(Node::NOTIFICATION_PROCESS);
 			}
 		}
+		// <ELIM>
+		if (zone_nodes) {
+			insights->end_zone();
+		}
+		// </ELIM>
 	}
 
 	p_group->call_queue.flush(); // Flush messages also after processing (for potential deferred calls).

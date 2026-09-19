@@ -32,6 +32,9 @@
 
 #include "../joints/jolt_joint_3d.h"
 #include "../jolt_physics_server_3d.h"
+// <ELIM>
+#include "core/profiling/profiling.h"
+// </ELIM>
 #include "../jolt_project_settings.h"
 #include "../misc/jolt_stream_wrappers.h"
 #include "../objects/jolt_area_3d.h"
@@ -184,10 +187,16 @@ void JoltSpace3D::step(float p_step) {
 	stepping = true;
 	last_step = p_step;
 
+	// <ELIM> TURNT Insights: step phases.
+	GodotProfileZoneGroupedFirst(_profile_zone, "jolt: pre_step");
+	// </ELIM>
 	_pre_step(p_step);
 
 	physics_system->SetBodyActivationListener(body_activation_listener);
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "jolt: update");
+	// </ELIM>
 	const JPH::EPhysicsUpdateError update_error = physics_system->Update(p_step, 1, temp_allocator, job_system);
 
 	if ((update_error & JPH::EPhysicsUpdateError::ManifoldCacheFull) != JPH::EPhysicsUpdateError::None) {
@@ -214,12 +223,18 @@ void JoltSpace3D::step(float p_step) {
 	// We only want a listener during the step, as it will otherwise be called when pending bodies are flushed, which causes issues (e.g. GH-115322).
 	physics_system->SetBodyActivationListener(nullptr);
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "jolt: post_step");
+	// </ELIM>
 	_post_step(p_step);
 
 	stepping = false;
 }
 
 void JoltSpace3D::call_queries() {
+	// <ELIM>
+	GodotProfileZone("jolt: call_queries");
+	// </ELIM>
 	while (body_call_queries_list.first()) {
 		JoltBody3D *body = body_call_queries_list.first()->self();
 		body_call_queries_list.remove(body_call_queries_list.first());
