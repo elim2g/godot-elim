@@ -1446,9 +1446,19 @@ void main() {
 	//compute tangents
 
 	vec4 position_alpha = imageLoad(position, ivec3(atlas_pos, params.atlas_slice));
+	// <ELIM> The wireframe pass leaves fractional alpha (line coverage) on chart-edge
+	// texels. Sub-0.5 ones are skipped by every light pass and filled by dilate,
+	// but they keep a valid normal and the raster's face normal in this mask slot,
+	// so the denoiser averaged their black into the edge. Flag them occluded like a
+	// killed texel. (Lighting them in place instead samples exactly on the edge and
+	// self-shadows at concave corners.)
 	if (position_alpha.a < 0.5) {
+		if (position_alpha.a > 0.0) {
+			imageStore(unocclude, ivec3(atlas_pos, params.atlas_slice), vec4(1.0, 0.0, 0.0, 0.0));
+		}
 		return;
 	}
+	// </ELIM>
 
 	vec3 vertex_pos = position_alpha.xyz;
 	vec4 normal_tsize = imageLoad(unocclude, ivec3(atlas_pos, params.atlas_slice));
