@@ -72,6 +72,9 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	wireframe = false;
 
 	unshaded = false;
+	// <ELIM> render_mode shadow_cast_disabled.
+	shadow_cast_disabled = false;
+	// </ELIM>
 	uses_vertex = false;
 	uses_position = false;
 	uses_sss = false;
@@ -119,6 +122,9 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_flags["wireframe"] = &wireframe;
 	actions.render_mode_flags["particle_trails"] = &uses_particle_trails;
 	actions.render_mode_flags["world_vertex_coords"] = &uses_world_coordinates;
+	// <ELIM> render_mode shadow_cast_disabled.
+	actions.render_mode_flags["shadow_cast_disabled"] = &shadow_cast_disabled;
+	// </ELIM>
 
 	actions.usage_flag_pointers["ALPHA"] = &uses_alpha;
 	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &uses_alpha_clip;
@@ -248,6 +254,12 @@ bool SceneShaderForwardClustered::ShaderData::is_animated() const {
 }
 
 bool SceneShaderForwardClustered::ShaderData::casts_shadows() const {
+	// <ELIM> render_mode shadow_cast_disabled. Instance-level casting is an OR over
+	// surface materials, so an instance made only of such surfaces leaves shadow culling.
+	if (shadow_cast_disabled) {
+		return false;
+	}
+	// </ELIM>
 	bool has_read_screen_alpha = uses_screen_texture || uses_depth_texture || uses_normal_texture;
 	bool has_base_alpha = (uses_alpha && (!uses_alpha_clip || uses_alpha_antialiasing)) || has_read_screen_alpha;
 	bool has_alpha = has_base_alpha || uses_blend_alpha;

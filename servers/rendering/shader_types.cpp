@@ -244,6 +244,9 @@ ShaderTypes::ShaderTypes() {
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("world_vertex_coords") });
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("ensure_correct_normals") });
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("shadows_disabled") });
+		// <ELIM> Per-material opt-out of shadow casting; shadows_disabled only stops receiving.
+		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("shadow_cast_disabled") });
+		// </ELIM>
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("ambient_light_disabled") });
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("shadow_to_opacity") });
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("vertex_lighting") });

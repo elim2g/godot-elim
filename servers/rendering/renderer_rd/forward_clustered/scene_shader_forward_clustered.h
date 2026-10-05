@@ -251,6 +251,9 @@ public:
 		bool wireframe = false;
 
 		bool unshaded = false;
+		// <ELIM> render_mode shadow_cast_disabled: never rendered into a shadow map.
+		bool shadow_cast_disabled = false;
+		// </ELIM>
 		bool uses_vertex = false;
 		bool uses_position = false;
 		bool uses_sss = false;

@@ -320,6 +320,9 @@ struct SceneShaderData : public ShaderData {
 	bool wireframe;
 
 	bool unshaded;
+	// <ELIM> render_mode shadow_cast_disabled: never rendered into a shadow map.
+	bool shadow_cast_disabled = false;
+	// </ELIM>
 	bool uses_vertex;
 	bool uses_position;
 	bool uses_sss;

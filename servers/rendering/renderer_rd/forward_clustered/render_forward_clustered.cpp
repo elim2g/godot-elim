@@ -4118,6 +4118,13 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW;
 	}
 
+	// <ELIM> render_mode shadow_cast_disabled: per surface, so an instance that mixes
+	// these with ordinary surfaces still casts from the ordinary ones.
+	if (p_material->shader_data->shadow_cast_disabled) {
+		flags &= ~GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW;
+	}
+	// </ELIM>
+
 	if (p_material->shader_data->uses_particle_trails) {
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS;
 	}

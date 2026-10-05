@@ -241,6 +241,13 @@ void RasterizerSceneGLES3::_geometry_instance_add_surface_with_material(Geometry
 		flags |= GeometryInstanceSurface::FLAG_PASS_SHADOW;
 	}
 
+	// <ELIM> render_mode shadow_cast_disabled: per surface, so an instance that mixes
+	// these with ordinary surfaces still casts from the ordinary ones.
+	if (p_material->shader_data->shadow_cast_disabled) {
+		flags &= ~GeometryInstanceSurface::FLAG_PASS_SHADOW;
+	}
+	// </ELIM>
+
 	if (p_material->shader_data->stencil_enabled) {
 		if (p_material->shader_data->stencil_flags & GLES3::SceneShaderData::STENCIL_FLAG_READ) {
 			// Stencil materials which read from the stencil buffer must be in the alpha pass.
