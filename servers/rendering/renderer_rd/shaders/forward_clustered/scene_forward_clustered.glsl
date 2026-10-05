@@ -2649,11 +2649,26 @@ void fragment_shader(in SceneData scene_data) {
 			// 	continue; // Statically baked light and object uses lightmap, skip
 			// }
 			bool lm_specular_only = false;
+			// Baked sun visibility: in SHADOWMASK_MODE_ONLY the mask (packed into
+			// shadow0 for light 0 above) is this light's exact, sky-aware per-texel
+			// visibility from the bake. It stands in for both the shadow map and the
+			// lm_direct_spec_occ brightness gate, and needs no realtime shadow.
+#if defined(USE_LIGHTMAP) && !defined(SHADOWS_DISABLED)
+			const bool lm_baked_sun = (i == 0u) && (shadowmask_mode == LIGHTMAP_SHADOWMASK_MODE_ONLY);
+#else
+			const bool lm_baked_sun = false;
+#endif
 			if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 #ifdef SHADOWS_DISABLED
 				continue; // Statically baked light and object uses lightmap, skip
 #else
-				if (lm_direct_spec_occ <= 0.0 || directional_lights.data[i].specular <= 0.0 || directional_lights.data[i].shadow_opacity <= 0.001) {
+				// if (lm_direct_spec_occ <= 0.0 || directional_lights.data[i].specular <= 0.0 || directional_lights.data[i].shadow_opacity <= 0.001) {
+				// 	continue; // Statically baked light and object uses lightmap, skip
+				// }
+				if (directional_lights.data[i].specular <= 0.0) {
+					continue;
+				}
+				if (!lm_baked_sun && (lm_direct_spec_occ <= 0.0 || directional_lights.data[i].shadow_opacity <= 0.001)) {
 					continue; // Statically baked light and object uses lightmap, skip
 				}
 				lm_specular_only = true;
@@ -2720,7 +2735,13 @@ void fragment_shader(in SceneData scene_data) {
 				shadow = float(shadow1 >> ((i - 4u) * 8u) & 0xFFu) / 255.0;
 			}
 
-			shadow = mix(1.0, shadow, directional_lights.data[i].shadow_opacity);
+			// <ELIM> The baked mask is visibility itself, not a shadow to fade by the
+			// light's (possibly zero) shadow opacity.
+			// shadow = mix(1.0, shadow, directional_lights.data[i].shadow_opacity);
+			if (!lm_baked_sun) {
+				shadow = mix(1.0, shadow, directional_lights.data[i].shadow_opacity);
+			}
+			// </ELIM>
 #endif
 
 			blur_shadow(shadow);
@@ -2729,8 +2750,9 @@ void fragment_shader(in SceneData scene_data) {
 			// value (the shadow pass no longer skips it), which is what stops the highlight
 			// passing through roofs. The baked factor multiplies on top - beyond
 			// directional_shadow_max_distance the cascade fades to unshadowed and the
-			// lightmap becomes the only evidence that a surface is enclosed.
-			if (lm_specular_only) {
+			// lightmap becomes the only evidence that a surface is enclosed. A baked mask
+			// has no far field to defend, so it skips the factor.
+			if (lm_specular_only && !lm_baked_sun) {
 				shadow *= lm_direct_spec_occ;
 			}
 			// </ELIM>

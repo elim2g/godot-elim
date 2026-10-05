@@ -397,6 +397,10 @@ void LightmapGIData::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOWMASK_MODE_NONE);
 	BIND_ENUM_CONSTANT(SHADOWMASK_MODE_REPLACE);
 	BIND_ENUM_CONSTANT(SHADOWMASK_MODE_OVERLAY);
+	// <ELIM> ONLY: lightmapped surfaces take the mask light's visibility from
+	// the mask alone and never sample its shadow map.
+	BIND_ENUM_CONSTANT(SHADOWMASK_MODE_ONLY);
+	// </ELIM>
 }
 
 LightmapGIData::LightmapGIData() {
@@ -3560,7 +3564,10 @@ void LightmapGI::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "bounce_saturation", PROPERTY_HINT_RANGE, "0,8,0.01"), "set_bounce_saturation", "get_bounce_saturation");
 	// </ELIM>
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "directional"), "set_directional", "is_directional");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadowmask_mode", PROPERTY_HINT_ENUM, "None,Replace,Overlay"), "set_shadowmask_mode", "get_shadowmask_mode");
+	// <ELIM> Expose ONLY.
+	// ADD_PROPERTY(PropertyInfo(Variant::INT, "shadowmask_mode", PROPERTY_HINT_ENUM, "None,Replace,Overlay"), "set_shadowmask_mode", "get_shadowmask_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadowmask_mode", PROPERTY_HINT_ENUM, "None,Replace,Overlay,Only"), "set_shadowmask_mode", "get_shadowmask_mode");
+	// </ELIM>
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_texture_for_bounces"), "set_use_texture_for_bounces", "is_using_texture_for_bounces");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "interior"), "set_interior", "is_interior");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_denoiser"), "set_use_denoiser", "is_using_denoiser");

@@ -1261,10 +1261,27 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	}
 
 	// Find any directional light suitable for shadowmasking.
+	// <ELIM> A static sun qualifies too: TURNT keeps the sun's diffuse in the
+	// atlas and uses the mask only as the sun's per-texel visibility for runtime
+	// specular. A dynamic directional, when present, still wins (selection below).
+	// if (p_bake_shadowmask) {
+	// 	bool found = false;
+	// 	for (int i = 0; i < lights.size(); i++) {
+	// 		if (lights[i].type == LightType::LIGHT_TYPE_DIRECTIONAL && !lights[i].static_bake) {
+	// 			found = true;
+	// 			break;
+	// 		}
+	// 	}
+	//
+	// 	if (!found) {
+	// 		p_bake_shadowmask = false;
+	// 		WARN_PRINT("Shadowmask disabled: no directional light with their bake mode set to dynamic exists.");
+	// 	}
+	// }
 	if (p_bake_shadowmask) {
 		bool found = false;
 		for (int i = 0; i < lights.size(); i++) {
-			if (lights[i].type == LightType::LIGHT_TYPE_DIRECTIONAL && !lights[i].static_bake) {
+			if (lights[i].type == LightType::LIGHT_TYPE_DIRECTIONAL) {
 				found = true;
 				break;
 			}
@@ -1272,9 +1289,10 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 		if (!found) {
 			p_bake_shadowmask = false;
-			WARN_PRINT("Shadowmask disabled: no directional light with their bake mode set to dynamic exists.");
+			WARN_PRINT("Shadowmask disabled: no directional light exists.");
 		}
 	}
+	// </ELIM>
 
 #ifdef DEBUG_TEXTURES
 	for (int i = 0; i < atlas_slices; i++) {
@@ -1485,6 +1503,18 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				shadowmask_lights_count += 1;
 			}
 		}
+		// <ELIM> No dynamic directional: fall back to the first static one.
+		if (shadowmask_light_idx < 0) {
+			for (int i = 0; i < lights.size(); i++) {
+				if (lights[i].type == LightType::LIGHT_TYPE_DIRECTIONAL) {
+					if (shadowmask_light_idx < 0) {
+						shadowmask_light_idx = i;
+					}
+					shadowmask_lights_count += 1;
+				}
+			}
+		}
+		// </ELIM>
 
 		if (shadowmask_lights_count > 1) {
 			WARN_PRINT(
