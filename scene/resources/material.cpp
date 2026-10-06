@@ -1431,9 +1431,19 @@ void vertex() {)";
 	uv1_triplanar_pos = VERTEX * uv1_scale + uv1_offset;
 )";
 		}
+		// <ELIM> Snap near-zero weights to zero so triplanar_texture can skip those
+		// planes: vertex normals come back from the 16-bit octahedral encoding with
+		// ~1e-5 off-axis components, so an axis-aligned face never reaches exact
+		// zero on its own. 0.001 is a face within ~0.06 deg of an axis.
+		// code += R"(	uv1_power_normal /= dot(uv1_power_normal, vec3(1.0));
+		// 	uv1_triplanar_pos *= vec3(1.0, -1.0, 1.0);
+		// )";
 		code += R"(	uv1_power_normal /= dot(uv1_power_normal, vec3(1.0));
+	uv1_power_normal *= step(0.001, uv1_power_normal);
+	uv1_power_normal /= dot(uv1_power_normal, vec3(1.0));
 	uv1_triplanar_pos *= vec3(1.0, -1.0, 1.0);
 )";
+		// </ELIM>
 	}
 
 	if (flags[FLAG_UV2_USE_TRIPLANAR]) {
@@ -1450,9 +1460,16 @@ void vertex() {)";
 	uv2_triplanar_pos = VERTEX * uv2_scale + uv2_offset;
 )";
 		}
+		// <ELIM> Same zero-weight snap as UV1.
+		// code += R"(	uv2_power_normal /= dot(uv2_power_normal, vec3(1.0));
+		// 	uv2_triplanar_pos *= vec3(1.0, -1.0, 1.0);
+		// )";
 		code += R"(	uv2_power_normal /= dot(uv2_power_normal, vec3(1.0));
+	uv2_power_normal *= step(0.001, uv2_power_normal);
+	uv2_power_normal /= dot(uv2_power_normal, vec3(1.0));
 	uv2_triplanar_pos *= vec3(1.0, -1.0, 1.0);
 )";
+		// </ELIM>
 	}
 
 	if (grow_enabled) {
@@ -1492,15 +1509,38 @@ float msdf_median(float r, float g, float b) {
 	}
 
 	if (flags[FLAG_UV1_USE_TRIPLANAR] || flags[FLAG_UV2_USE_TRIPLANAR]) {
+		// <ELIM> Skip planes whose weight is zero: two of three on any axis-aligned
+		// face (brush geometry), so 2/3 of every triplanar fetch. The branch is not
+		// uniform across a quad where interpolated weights cross zero, so take the
+		// gradients before branching and sample with textureGrad.
+		// code += R"(
+		// vec4 triplanar_texture(sampler2D p_sampler, vec3 p_weights, vec3 p_triplanar_pos) {
+		// 	vec4 samp = vec4(0.0);
+		// 	samp += texture(p_sampler, p_triplanar_pos.xy) * p_weights.z;
+		// 	samp += texture(p_sampler, p_triplanar_pos.xz) * p_weights.y;
+		// 	samp += texture(p_sampler, p_triplanar_pos.zy * vec2(-1.0, 1.0)) * p_weights.x;
+		// 	return samp;
+		// }
+		// )";
 		code += R"(
 vec4 triplanar_texture(sampler2D p_sampler, vec3 p_weights, vec3 p_triplanar_pos) {
 	vec4 samp = vec4(0.0);
-	samp += texture(p_sampler, p_triplanar_pos.xy) * p_weights.z;
-	samp += texture(p_sampler, p_triplanar_pos.xz) * p_weights.y;
-	samp += texture(p_sampler, p_triplanar_pos.zy * vec2(-1.0, 1.0)) * p_weights.x;
+	vec3 dpdx = dFdx(p_triplanar_pos);
+	vec3 dpdy = dFdy(p_triplanar_pos);
+	if (p_weights.z > 0.0) {
+		samp += textureGrad(p_sampler, p_triplanar_pos.xy, dpdx.xy, dpdy.xy) * p_weights.z;
+	}
+	if (p_weights.y > 0.0) {
+		samp += textureGrad(p_sampler, p_triplanar_pos.xz, dpdx.xz, dpdy.xz) * p_weights.y;
+	}
+	if (p_weights.x > 0.0) {
+		const vec2 flip = vec2(-1.0, 1.0);
+		samp += textureGrad(p_sampler, p_triplanar_pos.zy * flip, dpdx.zy * flip, dpdy.zy * flip) * p_weights.x;
+	}
 	return samp;
 }
 )";
+		// </ELIM>
 	}
 
 	// Generate fragment shader.
