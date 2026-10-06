@@ -632,29 +632,56 @@ void SceneTree::iteration_prepare() {
 bool SceneTree::physics_process(double p_time) {
 	current_frame++;
 
+	// <ELIM> TURNT Insights: phase zones for the physics tick's non-node work.
+	GodotProfileZoneGroupedFirst(_profile_zone, "phys: xform flush (pre)");
+	// </ELIM>
 	flush_transform_notifications();
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "phys: main loop script");
+	// </ELIM>
 	if (MainLoop::physics_process(p_time)) {
 		_quit = true;
 	}
 	physics_process_time = p_time;
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "phys: physics_frame signal");
+	// </ELIM>
 	emit_signal(SNAME("physics_frame"));
 
 #if !defined(PHYSICS_2D_DISABLED) || !defined(PHYSICS_3D_DISABLED)
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "phys: picking");
+	// </ELIM>
 	call_group(SNAME("_picking_viewports"), SNAME("_process_picking"));
 #endif // !defined(PHYSICS_2D_DISABLED) || !defined(PHYSICS_3D_DISABLED)
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "phys: node process");
+	// </ELIM>
 	_process(true);
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "phys: ugc + msgq");
+	// </ELIM>
 	_flush_ugc();
 	MessageQueue::get_singleton()->flush(); //small little hack
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "phys: timers + tweens");
+	// </ELIM>
 	process_timers(p_time, true); //go through timers
 	process_tweens(p_time, true);
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "phys: xform flush");
+	// </ELIM>
 	flush_transform_notifications();
 
+	// <ELIM>
+	GodotProfileZoneGrouped(_profile_zone, "phys: delete queue + idle callbacks");
+	// </ELIM>
 	// This should happen last because any processing that deletes something beforehand might expect the object to be removed in the same frame.
 	_flush_delete_queue();
 

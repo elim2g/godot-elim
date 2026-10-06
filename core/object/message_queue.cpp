@@ -33,6 +33,9 @@
 #include "core/config/project_settings.h"
 #include "core/object/class_db.h"
 #include "core/object/script_language.h"
+// <ELIM>
+#include "core/profiling/insights_singleton.h"
+// </ELIM>
 
 #include <cstdio>
 
@@ -261,6 +264,26 @@ Error CallQueue::flush() {
 
 		UNLOCK_MUTEX;
 
+		// <ELIM> TURNT Insights: one zone per deferred call while a capture is armed,
+		// named by target class and method, so queued redraws and layout updates
+		// are attributable.
+		TntInsights *insights = TntInsights::get_singleton();
+		const bool zone_message = insights != nullptr && insights->is_capturing();
+		if (zone_message) {
+			String zone_name = "msgq: " + (target ? String(target->get_class_name()) : String("null"));
+			switch (message->type & FLAG_MASK) {
+				case TYPE_CALL:
+				case TYPE_SET:
+					zone_name += " " + String(message->callable.get_method());
+					break;
+				case TYPE_NOTIFICATION:
+					zone_name += " notification " + itos(message->notification);
+					break;
+			}
+			insights->begin_zone(zone_name);
+		}
+		// </ELIM>
+
 		switch (message->type & FLAG_MASK) {
 			case TYPE_CALL: {
 				if (target || (message->type & FLAG_NULL_IS_OK)) {
@@ -280,6 +303,12 @@ Error CallQueue::flush() {
 				}
 			} break;
 		}
+
+		// <ELIM>
+		if (zone_message) {
+			insights->end_zone();
+		}
+		// </ELIM>
 
 		if ((message->type & FLAG_MASK) != TYPE_NOTIFICATION) {
 			Variant *args = (Variant *)(message + 1);
