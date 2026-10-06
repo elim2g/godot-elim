@@ -302,6 +302,28 @@ void LightmapGIData::set_surface_lights(const Array &p_lights) {
 Array LightmapGIData::get_surface_lights() const {
 	return surface_lights;
 }
+
+void LightmapGIData::_update_emitter_arcs() {
+	RS::get_singleton()->lightmap_set_emitter_arcs(lightmap, emitter_arcs, emitter_specular);
+}
+
+void LightmapGIData::set_emitter_arcs(bool p_enable) {
+	emitter_arcs = p_enable;
+	_update_emitter_arcs();
+}
+
+bool LightmapGIData::has_emitter_arcs() const {
+	return emitter_arcs;
+}
+
+void LightmapGIData::set_emitter_specular(bool p_enable) {
+	emitter_specular = p_enable;
+	_update_emitter_arcs();
+}
+
+bool LightmapGIData::is_emitter_specular_enabled() const {
+	return emitter_specular;
+}
 // </ELIM>
 
 Dictionary LightmapGIData::_get_probe_data() const {
@@ -371,6 +393,10 @@ void LightmapGIData::_bind_methods() {
 	// <ELIM>
 	ClassDB::bind_method(D_METHOD("set_surface_lights", "lights"), &LightmapGIData::set_surface_lights);
 	ClassDB::bind_method(D_METHOD("get_surface_lights"), &LightmapGIData::get_surface_lights);
+	ClassDB::bind_method(D_METHOD("set_emitter_arcs", "enable"), &LightmapGIData::set_emitter_arcs);
+	ClassDB::bind_method(D_METHOD("has_emitter_arcs"), &LightmapGIData::has_emitter_arcs);
+	ClassDB::bind_method(D_METHOD("set_emitter_specular", "enable"), &LightmapGIData::set_emitter_specular);
+	ClassDB::bind_method(D_METHOD("is_emitter_specular_enabled"), &LightmapGIData::is_emitter_specular_enabled);
 	// </ELIM>
 
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "lightmap_textures", PROPERTY_HINT_ARRAY_TYPE, "TextureLayered", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_READ_ONLY), "set_lightmap_textures", "get_lightmap_textures");
@@ -380,6 +406,8 @@ void LightmapGIData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "probe_data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_probe_data", "_get_probe_data");
 	// <ELIM>
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "surface_lights", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_surface_lights", "get_surface_lights");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "emitter_arcs", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_emitter_arcs", "has_emitter_arcs");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "emitter_specular", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_emitter_specular", "is_emitter_specular_enabled");
 	// </ELIM>
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "_uses_packed_directional", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_uses_packed_directional", "_is_using_packed_directional");
 
@@ -2787,6 +2815,9 @@ LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Li
 	} else {
 		gi_data->clear_shadowmask_textures();
 	}
+	// <ELIM> Set every bake: reused data must not keep a previous bake's layout.
+	gi_data->set_emitter_arcs(save_shadowmask && lightmapper->get_emitter_arcs());
+	// </ELIM>
 
 	gi_data->set_uses_spherical_harmonics(directional);
 	gi_data->_set_uses_packed_directional(directional); // New SH lightmaps are packed automatically.

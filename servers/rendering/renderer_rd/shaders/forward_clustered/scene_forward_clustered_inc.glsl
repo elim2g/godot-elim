@@ -214,6 +214,14 @@ directional_lights;
 #define LIGHTMAP_SHADOWMASK_MODE_OVERLAY 2
 #define LIGHTMAP_SHADOWMASK_MODE_ONLY 3
 
+// <ELIM> Lightmap flags = shadowmask mode in the low byte, emitter-arc bits above
+// (LightStorage::LIGHTMAP_FLAG_EMITTER_*). With EMITTER_ARCS the shadowmask array
+// holds two layers per slice and the sun visibility is the first layer's alpha.
+#define LIGHTMAP_SHADOWMASK_MODE_MASK 0xFFu
+#define LIGHTMAP_FLAG_EMITTER_ARCS (1u << 8)
+#define LIGHTMAP_FLAG_EMITTER_SPECULAR (1u << 9)
+// </ELIM>
+
 struct Lightmap {
 	mat3 normal_xform;
 	vec2 light_texture_size;

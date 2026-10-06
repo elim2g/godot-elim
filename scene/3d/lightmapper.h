@@ -205,6 +205,10 @@ public:
 	virtual Ref<Image> get_bake_texture(int p_index) const = 0;
 	virtual int get_shadowmask_texture_count() const = 0;
 	virtual Ref<Image> get_shadowmask_texture(int p_index) const = 0;
+	// <ELIM> True when the shadowmask textures carry emitter arcs: two RGBA layers per
+	// atlas slice, (A.xy, half-width, sun visibility) then (B.xy, 0, log intensity).
+	virtual bool get_emitter_arcs() const { return false; }
+	// </ELIM>
 	virtual int get_bake_mesh_count() const = 0;
 	virtual Variant get_bake_mesh_userdata(int p_index) const = 0;
 	virtual Rect2 get_bake_mesh_uv_scale(int p_index) const = 0;

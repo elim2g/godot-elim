@@ -2108,6 +2108,33 @@ void LightStorage::lightmap_set_shadowmask_mode(RID p_lightmap, RS::ShadowmaskMo
 	lm->shadowmask_mode = p_mode;
 }
 
+// <ELIM>
+void LightStorage::lightmap_set_emitter_arcs(RID p_lightmap, bool p_has_arcs, bool p_enabled) {
+	Lightmap *lm = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL(lm);
+
+	lm->emitter_arcs = p_has_arcs;
+	lm->emitter_specular = p_enabled;
+}
+
+bool LightStorage::lightmap_has_emitter_arcs(RID p_lightmap) const {
+	const Lightmap *lm = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL_V(lm, false);
+
+	return lm->emitter_arcs;
+}
+
+uint32_t LightStorage::lightmap_get_emitter_arc_flags(RID p_lightmap) const {
+	const Lightmap *lm = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL_V(lm, 0);
+
+	if (!lm->emitter_arcs) {
+		return 0;
+	}
+	return LIGHTMAP_FLAG_EMITTER_ARCS | (lm->emitter_specular ? LIGHTMAP_FLAG_EMITTER_SPECULAR : 0);
+}
+// </ELIM>
+
 /* LIGHTMAP INSTANCE */
 
 RID LightStorage::lightmap_instance_create(RID p_lightmap) {

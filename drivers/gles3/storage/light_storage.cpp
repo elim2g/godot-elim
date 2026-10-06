@@ -1251,6 +1251,14 @@ void LightStorage::lightmap_set_shadowmask_mode(RID p_lightmap, RS::ShadowmaskMo
 	lightmap->shadowmask_mode = p_mode;
 }
 
+// <ELIM>
+void LightStorage::lightmap_set_emitter_arcs(RID p_lightmap, bool p_has_arcs, bool p_enabled) {
+	Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL(lightmap);
+	lightmap->emitter_arcs = p_has_arcs;
+}
+// </ELIM>
+
 /* LIGHTMAP INSTANCE */
 
 RID LightStorage::lightmap_instance_create(RID p_lightmap) {

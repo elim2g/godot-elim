@@ -720,7 +720,10 @@ void RenderForwardMobile::_setup_lightmaps(const RenderDataRD *p_render_data, co
 
 		// Exposure.
 		scene_state.lightmaps[i].exposure_normalization = 1.0;
-		scene_state.lightmaps[i].flags = light_storage->lightmap_get_shadowmask_mode(lightmap);
+		// <ELIM> The mobile shader cannot read an emitter-arc layout: no shadowmask.
+		// scene_state.lightmaps[i].flags = light_storage->lightmap_get_shadowmask_mode(lightmap);
+		scene_state.lightmaps[i].flags = light_storage->lightmap_has_emitter_arcs(lightmap) ? (uint32_t)RS::SHADOWMASK_MODE_NONE : (uint32_t)light_storage->lightmap_get_shadowmask_mode(lightmap);
+		// </ELIM>
 		if (p_render_data->camera_attributes.is_valid()) {
 			float baked_exposure = light_storage->lightmap_get_baked_exposure_normalization(lightmap);
 			float enf = RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes);

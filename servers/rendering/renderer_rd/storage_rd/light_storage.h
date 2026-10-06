@@ -340,6 +340,10 @@ private:
 		RID light_texture;
 		RID shadow_texture;
 		RS::ShadowmaskMode shadowmask_mode = RS::SHADOWMASK_MODE_NONE;
+		// <ELIM> See RenderingServer::lightmap_set_emitter_arcs.
+		bool emitter_arcs = false;
+		bool emitter_specular = true;
+		// </ELIM>
 		bool uses_spherical_harmonics = false;
 		bool interior = false;
 		AABB bounds = AABB(Vector3(), Vector3(1, 1, 1));
@@ -1015,6 +1019,16 @@ public:
 	virtual void lightmap_set_shadowmask_textures(RID p_lightmap, RID p_shadow) override;
 	virtual RS::ShadowmaskMode lightmap_get_shadowmask_mode(RID p_lightmap) override;
 	virtual void lightmap_set_shadowmask_mode(RID p_lightmap, RS::ShadowmaskMode p_mode) override;
+	// <ELIM> Emitter arcs. The scene renderers pack the shadowmask mode with
+	// LIGHTMAP_FLAG_EMITTER_ARCS / _SPECULAR into the per-lightmap GPU flags.
+	enum {
+		LIGHTMAP_FLAG_EMITTER_ARCS = 1 << 8,
+		LIGHTMAP_FLAG_EMITTER_SPECULAR = 1 << 9,
+	};
+	virtual void lightmap_set_emitter_arcs(RID p_lightmap, bool p_has_arcs, bool p_enabled) override;
+	bool lightmap_has_emitter_arcs(RID p_lightmap) const;
+	uint32_t lightmap_get_emitter_arc_flags(RID p_lightmap) const;
+	// </ELIM>
 
 	virtual float lightmap_get_probe_capture_update_speed() const override {
 		return lightmap_probe_capture_update_speed;

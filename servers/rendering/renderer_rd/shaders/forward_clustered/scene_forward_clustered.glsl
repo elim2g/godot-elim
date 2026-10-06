@@ -1210,6 +1210,65 @@ vec3 encode24(vec3 v) {
 }
 #endif // MODE_RENDER_NORMAL_ROUGHNESS
 
+// <ELIM> Emitter arcs: the per-texel dominant baked emitter, stored by the
+// lightmapper (lm_compute.glsl, "Emitter arcs") as a great-circle arc on the sphere
+// of directions - endpoints A, B hemi-octahedral in a frame built from the normal
+// and a fixed reference, an angular half-width, and log2 of radiance times visible
+// solid angle. Keep the decoders in sync with the encoders there.
+#ifdef USE_LIGHTMAP
+const vec3 EMITTER_ARC_FRAME_REF = vec3(0.26726124, 0.53452248, 0.80178373); // normalize(1, 2, 3)
+const float EMITTER_ARC_LOG_MIN = -10.0;
+const float EMITTER_ARC_LOG_RANGE = 20.0;
+const float EMITTER_ARC_WIDTH_MAX = 1.5707963; // half pi
+
+vec3 emitter_arc_decode_dir(vec2 p_enc, vec3 p_t, vec3 p_b, vec3 p_n) {
+	vec2 e = p_enc * 2.0 - 1.0;
+	vec2 p = vec2(e.x + e.y, e.x - e.y) * 0.5;
+	float z = 1.0 - abs(p.x) - abs(p.y);
+	return normalize(p_t * p.x + p_b * p.y + p_n * max(z, 0.0));
+}
+
+// Karis' representative point for a tube light, on the sphere: the direction on
+// the minor arc A..B closest to the reflection vector p_r, then moved toward p_r
+// by up to the arc's angular half-width.
+vec3 emitter_arc_representative_dir(vec3 p_a, vec3 p_b, float p_width, vec3 p_r) {
+	vec3 l = normalize(p_a + p_b);
+	vec3 n = cross(p_a, p_b);
+	float n_len = length(n);
+	if (n_len > 1e-4) {
+		n /= n_len;
+		vec3 r_on_circle = p_r - n * dot(p_r, n);
+		float r_len = length(r_on_circle);
+		if (r_len > 1e-4) {
+			r_on_circle /= r_len;
+			if (dot(cross(p_a, r_on_circle), n) >= 0.0 && dot(cross(r_on_circle, p_b), n) >= 0.0) {
+				l = r_on_circle;
+			} else {
+				l = dot(r_on_circle, p_a) > dot(r_on_circle, p_b) ? p_a : p_b;
+			}
+		}
+	}
+	float cos_lr = dot(l, p_r);
+	vec3 toward_r = p_r - l * cos_lr;
+	float toward_len = length(toward_r);
+	if (toward_len > 1e-5) {
+		float angle = min(acos(clamp(cos_lr, -1.0, 1.0)), p_width);
+		l = l * cos(angle) + (toward_r / toward_len) * sin(angle);
+	}
+	return l;
+}
+
+// Karis' energy normalisation: the arc widens the lobe along its length (line,
+// one dimension) and across it (half-width, two dimensions, as a sphere light).
+float emitter_arc_normalization(float p_alpha, float p_half_arc, float p_width) {
+	float alpha_line = clamp(p_alpha + 0.5 * tan(min(p_half_arc, 1.3)), p_alpha, 1.0);
+	float alpha_width = clamp(p_alpha + 0.5 * tan(min(p_width, 1.3)), p_alpha, 1.0);
+	float width_ratio = p_alpha / alpha_width;
+	return (p_alpha / alpha_line) * width_ratio * width_ratio;
+}
+#endif
+// </ELIM>
+
 void fragment_shader(in SceneData scene_data) {
 	uint instance_index = instance_index_interp;
 
@@ -2322,6 +2381,14 @@ void fragment_shader(in SceneData scene_data) {
 	direct_specular_light += specular_light_interp.rgb * f0;
 #endif
 
+	// <ELIM> The emitter-arc layout's first layer, kept when the sun-mask lookup
+	// below fetches it so the arc block does not fetch it again.
+#ifdef USE_LIGHTMAP
+	vec4 lm_arc_layer_a = vec4(0.0);
+	bool lm_arc_layer_a_valid = false;
+#endif
+	// </ELIM>
+
 	{ // Directional light.
 
 		// Do shadow and lighting in two passes to reduce register pressure.
@@ -2336,18 +2403,34 @@ void fragment_shader(in SceneData scene_data) {
 
 		if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 			const uint ofs = instances.data[instance_index].gi_offset & 0xFFFF;
-			shadowmask_mode = lightmaps.data[ofs].flags;
+			// <ELIM> The flags also carry the emitter-arc bits.
+			// shadowmask_mode = lightmaps.data[ofs].flags;
+			shadowmask_mode = lightmaps.data[ofs].flags & LIGHTMAP_SHADOWMASK_MODE_MASK;
+			const bool lm_arc_layout = bool(lightmaps.data[ofs].flags & LIGHTMAP_FLAG_EMITTER_ARCS);
+			// </ELIM>
 
 			if (shadowmask_mode != LIGHTMAP_SHADOWMASK_MODE_NONE) {
 				const uint slice = instances.data[instance_index].gi_offset >> 16;
 				const vec2 scaled_uv = uv2 * instances.data[instance_index].lightmap_uv_scale.zw + instances.data[instance_index].lightmap_uv_scale.xy;
-				const vec3 uvw = vec3(scaled_uv, float(slice));
-
+				// <ELIM> Arc layout: two layers per slice, sun visibility in the first one's alpha.
+				// const vec3 uvw = vec3(scaled_uv, float(slice));
+				//
+				// if (sc_use_lightmap_bicubic_filter()) {
+				// 	shadowmask = textureArray_bicubic(lightmap_textures[MAX_LIGHTMAP_TEXTURES + ofs], uvw, lightmaps.data[ofs].light_texture_size).x;
+				// } else {
+				// 	shadowmask = textureLod(sampler2DArray(lightmap_textures[MAX_LIGHTMAP_TEXTURES + ofs], SAMPLER_LINEAR_CLAMP), uvw, 0.0).x;
+				// }
+				const vec3 uvw = vec3(scaled_uv, float(lm_arc_layout ? slice * 2u : slice));
+				vec4 mask_sample;
 				if (sc_use_lightmap_bicubic_filter()) {
-					shadowmask = textureArray_bicubic(lightmap_textures[MAX_LIGHTMAP_TEXTURES + ofs], uvw, lightmaps.data[ofs].light_texture_size).x;
+					mask_sample = textureArray_bicubic(lightmap_textures[MAX_LIGHTMAP_TEXTURES + ofs], uvw, lightmaps.data[ofs].light_texture_size);
 				} else {
-					shadowmask = textureLod(sampler2DArray(lightmap_textures[MAX_LIGHTMAP_TEXTURES + ofs], SAMPLER_LINEAR_CLAMP), uvw, 0.0).x;
+					mask_sample = textureLod(sampler2DArray(lightmap_textures[MAX_LIGHTMAP_TEXTURES + ofs], SAMPLER_LINEAR_CLAMP), uvw, 0.0);
 				}
+				shadowmask = lm_arc_layout ? mask_sample.a : mask_sample.x;
+				lm_arc_layer_a = mask_sample;
+				lm_arc_layer_a_valid = lm_arc_layout;
+				// </ELIM>
 			}
 		}
 
@@ -2818,6 +2901,78 @@ void fragment_shader(in SceneData scene_data) {
 		}
 #endif // USE_VERTEX_LIGHTING
 	}
+
+	// <ELIM> Emitter arcs: this texel's dominant baked emitter shaded as a Karis tube
+	// light. Its diffuse is already in the lightmap, so only the specular is kept;
+	// its visibility is the bake's (the stored intensity carries it), so there is no
+	// shadow lookup. Colour comes from the lightmap's chroma.
+#if defined(USE_LIGHTMAP) && !defined(USE_VERTEX_LIGHTING)
+	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+		const uint arc_lm = instances.data[instance_index].gi_offset & 0xFFFF;
+		const uint arc_flags = lightmaps.data[arc_lm].flags;
+		if ((arc_flags & (LIGHTMAP_FLAG_EMITTER_ARCS | LIGHTMAP_FLAG_EMITTER_SPECULAR)) == (LIGHTMAP_FLAG_EMITTER_ARCS | LIGHTMAP_FLAG_EMITTER_SPECULAR)) {
+			const uint arc_slice = instances.data[instance_index].gi_offset >> 16;
+			const vec2 arc_uv = uv2 * instances.data[instance_index].lightmap_uv_scale.zw + instances.data[instance_index].lightmap_uv_scale.xy;
+			const vec4 arc_b_tex = textureLod(sampler2DArray(lightmap_textures[MAX_LIGHTMAP_TEXTURES + arc_lm], SAMPLER_LINEAR_CLAMP), vec3(arc_uv, float(arc_slice * 2u + 1u)), 0.0);
+			if (arc_b_tex.a > 0.0) {
+				const vec4 arc_a_tex = lm_arc_layer_a_valid ? lm_arc_layer_a : textureLod(sampler2DArray(lightmap_textures[MAX_LIGHTMAP_TEXTURES + arc_lm], SAMPLER_LINEAR_CLAMP), vec3(arc_uv, float(arc_slice * 2u)), 0.0);
+				float arc_intensity = exp2(arc_b_tex.a * EMITTER_ARC_LOG_RANGE + EMITTER_ARC_LOG_MIN) * lightmaps.data[arc_lm].exposure_normalization;
+
+				// The bake's frame, rebuilt from the geometric normal in view space
+				// (view_matrix rows rotate world directions into view space).
+				vec3 arc_ref = vec3(dot(scene_data.view_matrix[0].xyz, EMITTER_ARC_FRAME_REF), dot(scene_data.view_matrix[1].xyz, EMITTER_ARC_FRAME_REF), dot(scene_data.view_matrix[2].xyz, EMITTER_ARC_FRAME_REF));
+				vec3 arc_n = geo_normal;
+				vec3 arc_t = normalize(cross(arc_ref, arc_n));
+				vec3 arc_bt = cross(arc_n, arc_t);
+				vec3 arc_dir_a = emitter_arc_decode_dir(arc_a_tex.xy, arc_t, arc_bt, arc_n);
+				vec3 arc_dir_b = emitter_arc_decode_dir(arc_b_tex.xy, arc_t, arc_bt, arc_n);
+				float arc_width = arc_a_tex.z * EMITTER_ARC_WIDTH_MAX;
+
+				vec3 arc_view = normalize(view);
+				vec3 arc_l = emitter_arc_representative_dir(arc_dir_a, arc_dir_b, arc_width, reflect(-arc_view, normal));
+				float arc_alpha = max(float(roughness) * float(roughness), 1e-3);
+				float arc_half = 0.5 * acos(clamp(dot(arc_dir_a, arc_dir_b), -1.0, 1.0));
+				vec3 arc_chroma = vec3(1.0);
+#ifndef AMBIENT_LIGHT_DISABLED
+				float arc_lm_luma = dot(lm_dc_radiance, vec3(0.2126, 0.7152, 0.0722));
+				if (arc_lm_luma > 1e-4) {
+					arc_chroma = lm_dc_radiance / arc_lm_luma;
+				}
+#endif
+				vec3 arc_color = arc_chroma * (arc_intensity * emitter_arc_normalization(arc_alpha, arc_half, arc_width));
+
+#ifdef LIGHT_TRANSMITTANCE_USED
+				float arc_transmittance_z = transmittance_depth;
+#endif
+				vec3 arc_diffuse_before = diffuse_light;
+				light_compute(normal, arc_l, arc_view, 0.0, arc_color, true, 1.0, f0, roughness, metallic, 1.0, albedo, alpha, screen_uv, energy_compensation,
+#ifdef LIGHT_BACKLIGHT_USED
+						backlight,
+#endif
+#ifdef LIGHT_TRANSMITTANCE_USED
+						transmittance_color,
+						transmittance_depth,
+						transmittance_boost,
+						arc_transmittance_z,
+#endif
+#ifdef LIGHT_RIM_USED
+						rim, rim_tint,
+#endif
+#ifdef LIGHT_CLEARCOAT_USED
+						clearcoat, clearcoat_roughness, geo_normal,
+#endif // LIGHT_CLEARCOAT_USED
+#ifdef LIGHT_ANISOTROPY_USED
+						binormal,
+						tangent, anisotropy,
+#endif
+						diffuse_light,
+						direct_specular_light);
+				diffuse_light = arc_diffuse_before;
+			}
+		}
+	}
+#endif
+	// </ELIM>
 
 #ifndef USE_VERTEX_LIGHTING
 	{ //omni lights

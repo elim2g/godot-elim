@@ -773,6 +773,11 @@ public:
 	virtual void lightmap_set_shadowmask_textures(RID p_lightmap, RID p_shadow) = 0;
 	virtual ShadowmaskMode lightmap_get_shadowmask_mode(RID p_lightmap) = 0;
 	virtual void lightmap_set_shadowmask_mode(RID p_lightmap, ShadowmaskMode p_mode) = 0;
+	// <ELIM> p_has_arcs: the shadowmask holds emitter-arc layer pairs (sun visibility
+	// in the first layer's alpha). p_enabled: shade them. Forward+ only; other
+	// renderers treat an arc layout as no shadowmask.
+	virtual void lightmap_set_emitter_arcs(RID p_lightmap, bool p_has_arcs, bool p_enabled) = 0;
+	// </ELIM>
 
 	/* PARTICLES API */
 

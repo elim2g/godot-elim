@@ -326,6 +326,10 @@ class LightmapperRD : public Lightmapper {
 
 	Vector<Ref<Image>> lightmap_textures;
 	Vector<Ref<Image>> shadowmask_textures;
+	// <ELIM> shadowmask_textures holds emitter-arc layer pairs (see get_emitter_arcs).
+	bool emitter_arcs = false;
+	BakeError _pack_emitter_arcs(RenderingDevice *rd, Ref<RDShaderFile> &compute_shader, RID &compute_base_uniform_set, PushConstant &push_constant, RID p_arc_a_tex, RID p_arc_b_tex, RID p_shadowmask_tex, RID p_dest_a_tex, RID p_dest_b_tex, const Size2i &atlas_size, int atlas_slices);
+	// </ELIM>
 	Vector<Color> probe_values;
 
 	struct DilateParams {
@@ -374,6 +378,9 @@ public:
 	Ref<Image> get_bake_texture(int p_index) const override;
 	int get_shadowmask_texture_count() const override;
 	Ref<Image> get_shadowmask_texture(int p_index) const override;
+	// <ELIM>
+	bool get_emitter_arcs() const override { return emitter_arcs; }
+	// </ELIM>
 	int get_bake_mesh_count() const override;
 	Variant get_bake_mesh_userdata(int p_index) const override;
 	Rect2 get_bake_mesh_uv_scale(int p_index) const override;

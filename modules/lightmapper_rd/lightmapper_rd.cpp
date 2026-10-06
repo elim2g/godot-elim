@@ -210,6 +210,47 @@ void LightmapperRD::add_area_poly_light(const String &p_name, bool p_static, con
 		}
 	}
 	l.size = bounding_radius;
+
+	// Emitter-arc axis, one vec4 after the triangles: the polygon's in-plane
+	// major axis (area-weighted PCA). The direct pass fits each texel's arc along it,
+	// so a strip light reads as a streak and the axis is constant per light, which
+	// keeps the baked arc filterable. Moments are taken about the first vertex to
+	// keep world-space magnitudes out of the subtraction.
+	{
+		const Vector3 ref = p_poly_verts[0];
+		Basis moment(0, 0, 0, 0, 0, 0, 0, 0, 0);
+		Vector3 first_moment;
+		double area_sum = 0.0;
+		for (int t = 0; t < tri_count; t++) {
+			const Vector3 a = p_poly_verts[t * 3 + 0] - ref;
+			const Vector3 b = p_poly_verts[t * 3 + 1] - ref;
+			const Vector3 c = p_poly_verts[t * 3 + 2] - ref;
+			const double area = 0.5 * (double)(b - a).cross(c - a).length();
+			const Vector3 s = a + b + c;
+			// Second moment of a triangle about the origin: A/12 * (sum v v^T + s s^T).
+			for (int r = 0; r < 3; r++) {
+				for (int k = 0; k < 3; k++) {
+					moment.rows[r][k] += (real_t)(area / 12.0 * (a[r] * a[k] + b[r] * b[k] + c[r] * c[k] + s[r] * s[k]));
+				}
+			}
+			first_moment += s * (real_t)(area / 3.0);
+			area_sum += area;
+		}
+		const Vector3 centroid = first_moment / (real_t)area_sum;
+		Vector3 u = p_normal.get_any_perpendicular().normalized();
+		Vector3 w = p_normal.cross(u).normalized();
+		// In-plane covariance: moment minus area * centroid centroid^T, projected on (u, w).
+		const real_t cuu = u.dot(moment.xform(u)) - (real_t)area_sum * u.dot(centroid) * u.dot(centroid);
+		const real_t cww = w.dot(moment.xform(w)) - (real_t)area_sum * w.dot(centroid) * w.dot(centroid);
+		const real_t cuw = u.dot(moment.xform(w)) - (real_t)area_sum * u.dot(centroid) * w.dot(centroid);
+		const real_t theta = 0.5f * Math::atan2(2.0f * cuw, cuu - cww);
+		const Vector3 axis = (u * Math::cos(theta) + w * Math::sin(theta)).normalized();
+		poly_verts_data.push_back(axis.x);
+		poly_verts_data.push_back(axis.y);
+		poly_verts_data.push_back(axis.z);
+		poly_verts_data.push_back(0.0f);
+	}
+
 	lights.push_back(l);
 
 	LightMetadata md;
@@ -967,6 +1008,45 @@ LightmapperRD::BakeError LightmapperRD::_dilate(RenderingDevice *rd, Ref<RDShade
 	return BAKE_OK;
 }
 
+// <ELIM> Composes and dilates the emitter-arc layer pairs (lm_compute.glsl
+// MODE_PACK_EMITTER_ARCS).
+LightmapperRD::BakeError LightmapperRD::_pack_emitter_arcs(RenderingDevice *rd, Ref<RDShaderFile> &compute_shader, RID &compute_base_uniform_set, PushConstant &push_constant, RID p_arc_a_tex, RID p_arc_b_tex, RID p_shadowmask_tex, RID p_dest_a_tex, RID p_dest_b_tex, const Size2i &atlas_size, int atlas_slices) {
+	Vector<RD::Uniform> uniforms;
+	const RID bindings[5] = { p_dest_a_tex, p_dest_b_tex, p_arc_a_tex, p_arc_b_tex, p_shadowmask_tex };
+	for (int i = 0; i < 5; i++) {
+		RD::Uniform u;
+		u.uniform_type = i < 2 ? RD::UNIFORM_TYPE_IMAGE : RD::UNIFORM_TYPE_TEXTURE;
+		u.binding = i;
+		u.append_id(bindings[i]);
+		uniforms.push_back(u);
+	}
+
+	RID compute_shader_pack = rd->shader_create_from_spirv(compute_shader->get_spirv_stages("pack_arcs"));
+	ERR_FAIL_COND_V(compute_shader_pack.is_null(), BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES); //internal check, should not happen
+	RID compute_shader_pack_pipeline = rd->compute_pipeline_create(compute_shader_pack);
+
+	RID pack_uniform_set = rd->uniform_set_create(uniforms, compute_shader_pack, 1);
+
+	RD::ComputeListID compute_list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_pack_pipeline);
+	rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
+	rd->compute_list_bind_uniform_set(compute_list, pack_uniform_set, 1);
+	push_constant.region_ofs[0] = 0;
+	push_constant.region_ofs[1] = 0;
+	Vector3i group_size(Math::division_round_up(atlas_size.x, 8), Math::division_round_up(atlas_size.y, 8), 1);
+
+	for (int i = 0; i < atlas_slices; i++) {
+		push_constant.atlas_slice = i;
+		rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
+		rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
+	}
+	rd->compute_list_end();
+	rd->free_rid(compute_shader_pack);
+
+	return BAKE_OK;
+}
+// </ELIM>
+
 LightmapperRD::BakeError LightmapperRD::_pack_l1(RenderingDevice *rd, Ref<RDShaderFile> &compute_shader, RID &compute_base_uniform_set, PushConstant &push_constant, RID &source_light_tex, RID &dest_light_tex, const Size2i &atlas_size, int atlas_slices) {
 	Vector<RD::Uniform> uniforms = dilate_or_denoise_common_uniforms(source_light_tex, dest_light_tex);
 
@@ -1245,6 +1325,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	}
 	lightmap_textures.clear();
 	shadowmask_textures.clear();
+	// <ELIM>
+	emitter_arcs = false;
+	// </ELIM>
 	int grid_size = 128;
 
 	/* STEP 1: Fetch material textures and compute the bounds */
@@ -1278,6 +1361,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	// 		WARN_PRINT("Shadowmask disabled: no directional light with their bake mode set to dynamic exists.");
 	// 	}
 	// }
+	// Emitter arcs ride the shadowmask request but not its sun requirement: a map
+	// without a sun still has emitters to shade.
+	const bool bake_emitter_arcs = p_bake_shadowmask;
 	if (p_bake_shadowmask) {
 		bool found = false;
 		for (int i = 0; i < lights.size(); i++) {
@@ -1288,8 +1374,8 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		}
 
 		if (!found) {
+			// No sun visibility to bake; the arcs still are (sun channel = 0).
 			p_bake_shadowmask = false;
-			WARN_PRINT("Shadowmask disabled: no directional light exists.");
 		}
 	}
 	// </ELIM>
@@ -1349,21 +1435,55 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	RID light_environment_tex;
 	RID shadowmask_tex;
 	RID shadowmask_tex2;
+	// <ELIM> Emitter arcs: direct-pass state, then the packed layers.
+	RID arc_a_tex;
+	RID arc_b_tex;
+	RID arc_out_a_tex;
+	RID arc_out_b_tex;
+	// </ELIM>
 
-#define FREE_TEXTURES                    \
-	rd->free_rid(albedo_array_tex);      \
-	rd->free_rid(emission_array_tex);    \
-	rd->free_rid(normal_tex);            \
-	rd->free_rid(position_tex);          \
-	rd->free_rid(unocclude_tex);         \
-	rd->free_rid(light_source_tex);      \
-	rd->free_rid(light_accum_tex2);      \
-	rd->free_rid(light_accum_tex);       \
-	rd->free_rid(light_environment_tex); \
-	if (p_bake_shadowmask) {             \
-		rd->free_rid(shadowmask_tex);    \
-		rd->free_rid(shadowmask_tex2);   \
+	// <ELIM> Also frees the emitter-arc textures that were created.
+	// #define FREE_TEXTURES
+	// 	rd->free_rid(albedo_array_tex);
+	// 	rd->free_rid(emission_array_tex);
+	// 	rd->free_rid(normal_tex);
+	// 	rd->free_rid(position_tex);
+	// 	rd->free_rid(unocclude_tex);
+	// 	rd->free_rid(light_source_tex);
+	// 	rd->free_rid(light_accum_tex2);
+	// 	rd->free_rid(light_accum_tex);
+	// 	rd->free_rid(light_environment_tex);
+	// 	if (p_bake_shadowmask) {
+	// 		rd->free_rid(shadowmask_tex);
+	// 		rd->free_rid(shadowmask_tex2);
+	// 	}
+#define FREE_TEXTURES                      \
+	rd->free_rid(albedo_array_tex);        \
+	rd->free_rid(emission_array_tex);      \
+	rd->free_rid(normal_tex);              \
+	rd->free_rid(position_tex);            \
+	rd->free_rid(unocclude_tex);           \
+	rd->free_rid(light_source_tex);        \
+	rd->free_rid(light_accum_tex2);        \
+	rd->free_rid(light_accum_tex);         \
+	rd->free_rid(light_environment_tex);   \
+	if (p_bake_shadowmask) {               \
+		rd->free_rid(shadowmask_tex);      \
+		rd->free_rid(shadowmask_tex2);     \
+	}                                      \
+	if (arc_a_tex.is_valid()) {            \
+		rd->free_rid(arc_a_tex);           \
+	}                                      \
+	if (arc_b_tex.is_valid()) {            \
+		rd->free_rid(arc_b_tex);           \
+	}                                      \
+	if (arc_out_a_tex.is_valid()) {        \
+		rd->free_rid(arc_out_a_tex);       \
+	}                                      \
+	if (arc_out_b_tex.is_valid()) {        \
+		rd->free_rid(arc_out_b_tex);       \
 	}
+	// </ELIM>
 
 	{ // create all textures
 
@@ -1407,6 +1527,17 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			shadowmask_tex2 = rd->texture_create(tf, RD::TextureView());
 			rd->texture_clear(shadowmask_tex2, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
 		}
+
+		// <ELIM> Emitter arcs. Cleared to alpha 0 = "not processed" so the pack pass
+		// can dilate into the gutters.
+		if (bake_emitter_arcs) {
+			tf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+			arc_a_tex = rd->texture_create(tf, RD::TextureView());
+			rd->texture_clear(arc_a_tex, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
+			arc_b_tex = rd->texture_create(tf, RD::TextureView());
+			rd->texture_clear(arc_b_tex, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
+		}
+		// </ELIM>
 
 		// lightmap
 		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
@@ -1773,6 +1904,12 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		defines += "\n#define USE_SHADOWMASK\n";
 	}
 
+	// <ELIM>
+	if (bake_emitter_arcs) {
+		defines += "\n#define USE_EMITTER_ARCS\n";
+	}
+	// </ELIM>
+
 	compute_shader.instantiate();
 	err = compute_shader->parse_versions_from_text(lm_compute_shader_glsl, defines);
 	if (err != OK) {
@@ -1968,6 +2105,20 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				u.append_id(shadowmask_tex);
 				uniforms.push_back(u);
 			}
+
+			// <ELIM>
+			if (bake_emitter_arcs) {
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 6;
+				u.append_id(arc_a_tex);
+				uniforms.push_back(u);
+				u.binding = 7;
+				u.clear_ids();
+				u.append_id(arc_b_tex);
+				uniforms.push_back(u);
+			}
+			// </ELIM>
 		}
 
 		RID light_uniform_set = rd->uniform_set_create(uniforms, compute_shader_primary, 1);
@@ -2466,6 +2617,24 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				return error;
 			}
 		}
+
+		// <ELIM> Emitter arcs: compose the shipped layer pairs with the dilated sun
+		// mask (the arc textures stand in when there is no sun; the shader ignores
+		// it then) and dilate them. The direct-pass state is freed straight after.
+		if (bake_emitter_arcs) {
+			const RD::TextureFormat arc_tf = rd->texture_get_format(arc_a_tex);
+			arc_out_a_tex = rd->texture_create(arc_tf, RD::TextureView());
+			arc_out_b_tex = rd->texture_create(arc_tf, RD::TextureView());
+			error = _pack_emitter_arcs(rd, compute_shader, compute_base_uniform_set, push_constant, arc_a_tex, arc_b_tex, p_bake_shadowmask ? shadowmask_tex : arc_a_tex, arc_out_a_tex, arc_out_b_tex, atlas_size, atlas_slices);
+			if (unlikely(error != BAKE_OK)) {
+				return error;
+			}
+			rd->free_rid(arc_a_tex);
+			arc_a_tex = RID();
+			rd->free_rid(arc_b_tex);
+			arc_b_tex = RID();
+		}
+		// </ELIM>
 	}
 
 #ifdef DEBUG_TEXTURES
@@ -2646,6 +2815,19 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		lightmap_textures.push_back(img);
 	}
 
+	// <ELIM> With emitter arcs the shadowmask textures are RGBA layer pairs per slice
+	// (see Lightmapper::get_emitter_arcs) instead of an R8 sun mask.
+	emitter_arcs = bake_emitter_arcs;
+	if (bake_emitter_arcs) {
+		for (int i = 0; i < atlas_slices; i++) {
+			const RID arc_layers[2] = { arc_out_a_tex, arc_out_b_tex };
+			for (const RID &arc_layer : arc_layers) {
+				Vector<uint8_t> s = rd->texture_get_data(arc_layer, i);
+				shadowmask_textures.push_back(Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBA8, s));
+			}
+		}
+	} else
+	// </ELIM>
 	if (p_bake_shadowmask) {
 		for (int i = 0; i < atlas_slices; i++) {
 			Vector<uint8_t> s = rd->texture_get_data(shadowmask_tex, i);

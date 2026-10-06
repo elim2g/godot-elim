@@ -72,6 +72,14 @@ private:
 	Array surface_lights;
 	// </ELIM>
 
+	// <ELIM> The shadowmask textures hold emitter-arc layer pairs (Lightmapper::
+	// get_emitter_arcs); stored. emitter_specular is the runtime switch for shading
+	// them; not stored.
+	bool emitter_arcs = false;
+	bool emitter_specular = true;
+	void _update_emitter_arcs();
+	// </ELIM>
+
 	RID lightmap;
 	AABB bounds;
 	float baked_exposure = 1.0;
@@ -138,6 +146,10 @@ public:
 	// <ELIM>
 	void set_surface_lights(const Array &p_lights);
 	Array get_surface_lights() const;
+	void set_emitter_arcs(bool p_enable);
+	bool has_emitter_arcs() const;
+	void set_emitter_specular(bool p_enable);
+	bool is_emitter_specular_enabled() const;
 	// </ELIM>
 
 	void clear();

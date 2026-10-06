@@ -7,6 +7,9 @@ unocclude = "#define MODE_UNOCCLUDE";
 light_probes = "#define MODE_LIGHT_PROBES";
 denoise = "#define MODE_DENOISE";
 pack_coeffs = "#define MODE_PACK_L1_COEFFS";
+// <ELIM> Emitter-arc layers: compose and dilate.
+pack_arcs = "#define MODE_PACK_EMITTER_ARCS";
+// </ELIM>
 
 #[compute]
 
@@ -73,6 +76,25 @@ layout(rgba8, set = 1, binding = 5) uniform restrict image2DArray shadowmask;
 #elif defined(MODE_BOUNCE_LIGHT)
 layout(set = 1, binding = 5) uniform texture2D environment;
 #endif
+
+// <ELIM> Emitter arcs, read-modify-written across light batches like the shadowmask:
+// arc_a = (A.xy hemi-octahedral, half-width, 1 = texel processed),
+// arc_b = (B.xy hemi-octahedral, log intensity, log irradiance = selection key).
+#if defined(MODE_DIRECT_LIGHT) && defined(USE_EMITTER_ARCS)
+layout(rgba8, set = 1, binding = 6) uniform restrict image2DArray emitter_arc_a;
+layout(rgba8, set = 1, binding = 7) uniform restrict image2DArray emitter_arc_b;
+#endif
+
+// Packs the shipped layers: (A.xy, half-width, sun visibility) and
+// (B.xy, 0, log intensity), dilated into the chart gutters.
+#ifdef MODE_PACK_EMITTER_ARCS
+layout(rgba8, set = 1, binding = 0) uniform restrict writeonly image2DArray dest_arc_a;
+layout(rgba8, set = 1, binding = 1) uniform restrict writeonly image2DArray dest_arc_b;
+layout(set = 1, binding = 2) uniform texture2DArray source_arc_a;
+layout(set = 1, binding = 3) uniform texture2DArray source_arc_b;
+layout(set = 1, binding = 4) uniform texture2DArray source_shadowmask;
+#endif
+// </ELIM>
 
 #if defined(MODE_DILATE) || defined(MODE_DENOISE) || defined(MODE_PACK_L1_COEFFS)
 layout(rgba16f, set = 1, binding = 0) uniform restrict writeonly image2DArray dest_light;
@@ -584,7 +606,10 @@ float trace_shadow_transmittance(vec3 p_origin, vec3 p_target, bool p_skip_sky, 
 // triangle's contribution SEPARATELY. Recomputed rather than stored: an island
 // can carry hundreds of triangles and there is no per-triangle scratch, and
 // recomputing keeps the two passes provably identical.
-vec3 surface_light_tri_irradiance(uint p_base, uint p_tri, vec3 p_position, vec3 p_normal) {
+// Horizon-clips one polygon triangle against the receiver tangent plane and
+// returns its corners as unit directions from p_position (count < 3: nothing
+// above the horizon). Shared by the irradiance and emitter-arc paths.
+int surface_light_tri_clip(uint p_base, uint p_tri, vec3 p_position, vec3 p_normal, out vec3 r_clipped[4]) {
 	vec3 tv[3] = vec3[](
 			poly_verts.data[p_base + p_tri * 3u + 0u].xyz - p_position,
 			poly_verts.data[p_base + p_tri * 3u + 1u].xyz - p_position,
@@ -593,11 +618,10 @@ vec3 surface_light_tri_irradiance(uint p_base, uint p_tri, vec3 p_position, vec3
 	// vector into NaN and poison the whole sum; dropping the one sliver triangle
 	// at exact contact is invisible.
 	if (dot(tv[0], tv[0]) < 1e-12 || dot(tv[1], tv[1]) < 1e-12 || dot(tv[2], tv[2]) < 1e-12) {
-		return vec3(0.0);
+		return 0;
 	}
 	// Sutherland-Hodgman clip against the receiver tangent plane
 	// dot(p_normal, x) >= 0 (a clipped triangle has at most 4 verts).
-	vec3 clipped[4];
 	int clipped_count = 0;
 	for (int k = 0; k < 3; k++) {
 		vec3 va = tv[k];
@@ -605,18 +629,24 @@ vec3 surface_light_tri_irradiance(uint p_base, uint p_tri, vec3 p_position, vec3
 		float da = dot(p_normal, va);
 		float db = dot(p_normal, vb);
 		if (da >= 0.0) {
-			clipped[clipped_count++] = va;
+			r_clipped[clipped_count++] = va;
 		}
 		if ((da >= 0.0) != (db >= 0.0)) {
-			clipped[clipped_count++] = mix(va, vb, da / (da - db));
+			r_clipped[clipped_count++] = mix(va, vb, da / (da - db));
 		}
 	}
 	if (clipped_count < 3) {
-		return vec3(0.0);
+		return 0;
 	}
 	for (int k = 0; k < clipped_count; k++) {
-		clipped[k] = normalize(clipped[k]);
+		r_clipped[k] = normalize(r_clipped[k]);
 	}
+	return clipped_count;
+}
+
+// Spherical edge sum over a clipped triangle: the irradiance vector (its dot with
+// the receiver normal is the projected solid angle).
+vec3 surface_light_edge_sum(vec3 p_clipped[4], int p_count) {
 	// CPU packing contract: triangles are wound with their geometric normal ALONG
 	// the island normal; for that winding the canonical += edge sum yields an
 	// irradiance vector pointing away from the lit side, so accumulate NEGATED
@@ -624,9 +654,9 @@ vec3 surface_light_tri_irradiance(uint p_base, uint p_tri, vec3 p_position, vec3
 	// vertices ordered CW-as-seen-from-the-receiver for a positive += sum, which
 	// is the reverse winding).
 	vec3 e = vec3(0.0);
-	for (int k = 0; k < clipped_count; k++) {
-		vec3 va = clipped[k];
-		vec3 vb = clipped[(k + 1) % clipped_count];
+	for (int k = 0; k < p_count; k++) {
+		vec3 va = p_clipped[k];
+		vec3 vb = p_clipped[(k + 1) % p_count];
 		vec3 cr = cross(va, vb);
 		float crl = length(cr);
 		if (crl > 1e-7) {
@@ -635,6 +665,125 @@ vec3 surface_light_tri_irradiance(uint p_base, uint p_tri, vec3 p_position, vec3
 	}
 	return e;
 }
+
+vec3 surface_light_tri_irradiance(uint p_base, uint p_tri, vec3 p_position, vec3 p_normal) {
+	vec3 clipped[4];
+	int clipped_count = surface_light_tri_clip(p_base, p_tri, p_position, p_normal, clipped);
+	if (clipped_count < 3) {
+		return vec3(0.0);
+	}
+	return surface_light_edge_sum(clipped, clipped_count);
+}
+// </ELIM>
+
+// <ELIM> Emitter arcs: view-dependent specular from baked emitters.
+//
+// The direct pass keeps, per texel, the static non-directional light that delivers
+// the most irradiance and stores what the runtime needs to shade it as a Karis
+// tube light: the light's visible extent as a great-circle arc on the sphere of
+// directions (endpoints A and B plus an angular half-width) and its intensity,
+// radiance times visible solid angle, so the bake's own visibility applies.
+// Directions are hemi-octahedral in a frame built from the texel normal alone:
+// continuous inside the hemisphere (the light is always above the horizon) and
+// free of mesh tangents. scene_forward_clustered.glsl decodes with the same frame
+// and constants; keep both in sync.
+#if defined(MODE_DIRECT_LIGHT) && defined(USE_EMITTER_ARCS)
+// Fixed oblique reference: the frame is singular only for normals parallel to it,
+// which axis-aligned and 45-degree brush faces never are.
+const vec3 ARC_FRAME_REF = vec3(0.26726124, 0.53452248, 0.80178373); // normalize(1, 2, 3)
+const float ARC_LOG_MIN = -10.0;
+const float ARC_LOG_RANGE = 20.0;
+const float ARC_WIDTH_MAX = 1.5707963; // half pi
+
+vec2 arc_encode_dir(vec3 p_dir, vec3 p_normal) {
+	vec3 t = normalize(cross(ARC_FRAME_REF, p_normal));
+	vec3 b = cross(p_normal, t);
+	vec3 l = vec3(dot(p_dir, t), dot(p_dir, b), max(dot(p_dir, p_normal), 0.0));
+	l /= max(abs(l.x) + abs(l.y) + l.z, 1e-6);
+	return vec2(l.x + l.y, l.x - l.y) * 0.5 + 0.5;
+}
+
+// log2 over [ARC_LOG_MIN, ARC_LOG_MIN + ARC_LOG_RANGE]; 0 means no light.
+float arc_encode_log(float p_value) {
+	if (p_value <= exp2(ARC_LOG_MIN)) {
+		return 0.0;
+	}
+	return clamp((log2(p_value) - ARC_LOG_MIN) / ARC_LOG_RANGE, 1.0 / 255.0, 1.0);
+}
+
+vec3 arc_direction(vec3 p_center, vec3 p_tangent, vec3 p_plane_normal, float p_phi, float p_elevation) {
+	return normalize(cos(p_elevation) * (cos(p_phi) * p_center + sin(p_phi) * p_tangent) + sin(p_elevation) * p_plane_normal);
+}
+
+// The horizon-clipped polygon of area light p_light as seen from p_position,
+// fitted with a great-circle arc: the circle through the light centroid's
+// direction along the polygon's in-plane major axis (stored after its triangles
+// by add_area_poly_light), spanning the angular extent of the clipped corners,
+// widened by their angular spread off the circle. Also returns the clipped
+// polygon's solid angle and projected solid angle. False when nothing is above
+// the horizon.
+bool area_light_arc(uint p_light, vec3 p_position, vec3 p_normal, out vec3 r_a, out vec3 r_b, out float r_width, out float r_solid_angle, out float r_proj_solid_angle) {
+	Light light_data = lights.data[p_light];
+	uint base = light_data.pad;
+	uint tri_count = floatBitsToUint(light_data.cos_spot_angle);
+	vec3 axis = poly_verts.data[base + tri_count * 3u].xyz;
+
+	vec3 center = normalize(light_data.position - p_position);
+	vec3 plane_normal = cross(center, axis);
+	if (dot(plane_normal, plane_normal) < 1e-8) {
+		// Looking straight down the axis: any circle through the centroid will do.
+		plane_normal = cross(center, abs(center.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0));
+	}
+	plane_normal = normalize(plane_normal);
+	vec3 tangent = cross(plane_normal, center);
+
+	float phi_min = 1e9;
+	float phi_max = -1e9;
+	float el_min = 1e9;
+	float el_max = -1e9;
+	r_solid_angle = 0.0;
+	vec3 e_vec = vec3(0.0);
+	for (uint t = 0u; t < tri_count; t++) {
+		vec3 clipped[4];
+		int clipped_count = surface_light_tri_clip(base, t, p_position, p_normal, clipped);
+		if (clipped_count < 3) {
+			continue;
+		}
+		for (int k = 0; k < clipped_count; k++) {
+			vec3 u = clipped[k];
+			float phi = atan(dot(u, tangent), dot(u, center));
+			float el = asin(clamp(dot(u, plane_normal), -1.0, 1.0));
+			phi_min = min(phi_min, phi);
+			phi_max = max(phi_max, phi);
+			el_min = min(el_min, el);
+			el_max = max(el_max, el);
+		}
+		// Solid angle of the clipped corners as a fan (Van Oosterom-Strackee).
+		for (int k = 1; k + 1 < clipped_count; k++) {
+			vec3 u0 = clipped[0];
+			vec3 u1 = clipped[k];
+			vec3 u2 = clipped[k + 1];
+			float num = abs(dot(u0, cross(u1, u2)));
+			float den = 1.0 + dot(u0, u1) + dot(u1, u2) + dot(u2, u0);
+			r_solid_angle += 2.0 * atan(num, den);
+		}
+		e_vec += surface_light_edge_sum(clipped, clipped_count);
+	}
+	r_proj_solid_angle = dot(e_vec, p_normal);
+	if (phi_min > phi_max) {
+		return false;
+	}
+	// The runtime takes the minor arc between A and B; keep the span under pi.
+	float span_excess = max(phi_max - phi_min - 3.1, 0.0) * 0.5;
+	phi_min += span_excess;
+	phi_max -= span_excess;
+	float el_center = 0.5 * (el_min + el_max);
+	r_width = 0.5 * (el_max - el_min);
+	r_a = arc_direction(center, tangent, plane_normal, phi_min, el_center);
+	r_b = arc_direction(center, tangent, plane_normal, phi_max, el_center);
+	return true;
+}
+#endif
 // </ELIM>
 
 void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool p_soft_shadowing, out vec3 r_light, out vec3 r_light_dir, inout uint r_noise, float p_texel_size, out float r_shadow) {
@@ -1243,6 +1392,14 @@ void main() {
 	float shadowmask_value = 0.0f;
 #endif
 
+	// <ELIM> This batch's dominant emitter candidate (see the emitter-arc helpers).
+#ifdef USE_EMITTER_ARCS
+	float arc_best_luma = 0.0;
+	uint arc_best_light = 0u;
+	vec3 arc_best_dir = vec3(0.0);
+#endif
+	// </ELIM>
+
 #ifdef USE_SH_LIGHTMAPS
 	vec4 sh_accum[4] = vec4[](
 			vec4(0.0, 0.0, 0.0, 1.0),
@@ -1309,6 +1466,20 @@ void main() {
 			shadowmask_value = max(shadowmask_value, shadow);
 		}
 #endif
+
+		// <ELIM> Dominant emitter: the static non-directional light delivering the
+		// most irradiance (visibility included). The sun has its own mask.
+#ifdef USE_EMITTER_ARCS
+		if (lights.data[i].static_bake && lights.data[i].type != LIGHT_TYPE_DIRECTIONAL) {
+			float light_luma = dot(light, vec3(0.2126, 0.7152, 0.0722));
+			if (light_luma > arc_best_luma) {
+				arc_best_luma = light_luma;
+				arc_best_light = i;
+				arc_best_dir = light_dir;
+			}
+		}
+#endif
+		// </ELIM>
 	}
 
 	light_for_bounces *= bake_params.exposure_normalization;
@@ -1367,6 +1538,54 @@ void main() {
 	imageStore(shadowmask, ivec3(atlas_pos, params.atlas_slice), vec4(shadowmask_out, shadowmask_out, shadowmask_out, 1.0));
 	// </ELIM>
 #endif
+
+	// <ELIM> Fit this batch's dominant emitter with an arc and keep it if it beats
+	// the previous batches' winner (log irradiance in arc_b.a is the key).
+#ifdef USE_EMITTER_ARCS
+	{
+		ivec3 arc_pos = ivec3(atlas_pos, params.atlas_slice);
+		float prev_key = first_light_batch ? 0.0 : imageLoad(emitter_arc_b, arc_pos).a;
+		float key = arc_encode_log(arc_best_luma * bake_params.exposure_normalization);
+		bool stored = false;
+		if (key > prev_key) {
+			vec3 arc_a;
+			vec3 arc_b;
+			float width;
+			float intensity = 0.0;
+			bool fitted;
+			if (lights.data[arc_best_light].type == LIGHT_TYPE_AREA_POLY) {
+				float solid_angle;
+				float proj_solid_angle;
+				fitted = area_light_arc(arc_best_light, position, normal, arc_a, arc_b, width, solid_angle, proj_solid_angle);
+				// The bake's irradiance is radiance * projected solid angle * visibility;
+				// the specular needs radiance * solid angle * visibility.
+				if (fitted && proj_solid_angle > 1e-6) {
+					intensity = arc_best_luma * min(solid_angle / proj_solid_angle, 64.0);
+				}
+			} else {
+				// Punctual: a zero-length arc, widened by the light's radius.
+				arc_a = arc_best_dir;
+				arc_b = arc_best_dir;
+				float light_dist = max(distance(lights.data[arc_best_light].position, position), 1e-4);
+				width = atan(lights.data[arc_best_light].size, light_dist);
+				intensity = arc_best_luma / max(dot(normal, arc_best_dir), 0.01);
+				fitted = true;
+			}
+			float intensity_enc = arc_encode_log(intensity * bake_params.exposure_normalization);
+			if (fitted && intensity_enc > 0.0) {
+				imageStore(emitter_arc_a, arc_pos, vec4(arc_encode_dir(arc_a, normal), clamp(width / ARC_WIDTH_MAX, 0.0, 1.0), 1.0));
+				imageStore(emitter_arc_b, arc_pos, vec4(arc_encode_dir(arc_b, normal), intensity_enc, key));
+				stored = true;
+			}
+		}
+		if (!stored && first_light_batch) {
+			// Processed, no emitter (yet): straight up, zero intensity.
+			imageStore(emitter_arc_a, arc_pos, vec4(0.5, 0.5, 0.0, 1.0));
+			imageStore(emitter_arc_b, arc_pos, vec4(0.5, 0.5, 0.0, 0.0));
+		}
+	}
+#endif
+	// </ELIM>
 
 #endif
 
@@ -1760,4 +1979,46 @@ void main() {
 		imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice * 4 + i), c);
 	}
 #endif
+
+	// <ELIM> Emitter-arc layers. Gutter texels take their nearest processed
+	// neighbour, the same search as MODE_DILATE; that pass cannot be reused because
+	// it keys on alpha, which these layers spend on data. The sun mask is already
+	// dilated.
+#ifdef MODE_PACK_EMITTER_ARCS
+	{
+		ivec3 arc_pos = ivec3(atlas_pos, params.atlas_slice);
+		vec4 arc_a = texelFetch(sampler2DArray(source_arc_a, linear_sampler), arc_pos, 0);
+		vec4 arc_b = texelFetch(sampler2DArray(source_arc_b, linear_sampler), arc_pos, 0);
+		if (arc_a.a < 0.5) {
+			const int max_radius = int(4.0 * bake_params.supersampling_factor);
+			const ivec2 directions[8] = ivec2[8](ivec2(-1, 0), ivec2(0, 1), ivec2(1, 0), ivec2(0, -1), ivec2(-1, -1), ivec2(-1, 1), ivec2(1, -1), ivec2(1, 1));
+			for (int radius = 1; radius <= max_radius && arc_a.a < 0.5; radius++) {
+				for (uint i = 0; i < 8; i++) {
+					const ivec2 sample_pos = atlas_pos + directions[i] * radius;
+					if (any(lessThan(sample_pos, ivec2(0))) || any(greaterThanEqual(sample_pos, textureSize(source_arc_a, 0).xy))) {
+						continue;
+					}
+					vec4 neighbor_a = texelFetch(sampler2DArray(source_arc_a, linear_sampler), ivec3(sample_pos, params.atlas_slice), 0);
+					if (neighbor_a.a > 0.5) {
+						arc_a = neighbor_a;
+						arc_b = texelFetch(sampler2DArray(source_arc_b, linear_sampler), ivec3(sample_pos, params.atlas_slice), 0);
+						break;
+					}
+				}
+			}
+		}
+		if (arc_a.a < 0.5) {
+			// Beyond the search radius: no light, straight up.
+			arc_a = vec4(0.5, 0.5, 0.0, 0.0);
+			arc_b = vec4(0.5, 0.5, 0.0, 0.0);
+		}
+		float sun = 0.0;
+		if (bake_params.shadowmask_light_idx >= 0) {
+			sun = texelFetch(sampler2DArray(source_shadowmask, linear_sampler), arc_pos, 0).r;
+		}
+		imageStore(dest_arc_a, arc_pos, vec4(arc_a.rgb, sun));
+		imageStore(dest_arc_b, arc_pos, vec4(arc_b.rg, 0.0, arc_b.b));
+	}
+#endif
+	// </ELIM>
 }

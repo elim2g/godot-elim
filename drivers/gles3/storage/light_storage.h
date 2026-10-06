@@ -182,6 +182,10 @@ struct Lightmap {
 	Vector2i light_texture_size;
 	int32_t array_index = -1; //unassigned
 	RS::ShadowmaskMode shadowmask_mode = RS::SHADOWMASK_MODE_NONE;
+	// <ELIM> Emitter-arc layout (Forward+ only): GLES3 cannot read it, so a lightmap
+	// carrying arcs renders as if it had no shadowmask.
+	bool emitter_arcs = false;
+	// </ELIM>
 	PackedVector3Array points;
 	PackedColorArray point_sh;
 	PackedInt32Array tetrahedra;
@@ -739,6 +743,9 @@ public:
 	virtual void lightmap_set_shadowmask_textures(RID p_lightmap, RID p_shadow) override;
 	virtual RS::ShadowmaskMode lightmap_get_shadowmask_mode(RID p_lightmap) override;
 	virtual void lightmap_set_shadowmask_mode(RID p_lightmap, RS::ShadowmaskMode p_mode) override;
+	// <ELIM>
+	virtual void lightmap_set_emitter_arcs(RID p_lightmap, bool p_has_arcs, bool p_enabled) override;
+	// </ELIM>
 
 	/* LIGHTMAP INSTANCE */
 

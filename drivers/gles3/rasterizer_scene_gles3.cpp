@@ -3458,7 +3458,10 @@ void RasterizerSceneGLES3::_render_list_template(RenderListParameters *p_params,
 						GLES3::LightmapInstance *li = GLES3::LightStorage::get_singleton()->get_lightmap_instance(inst->lightmap_instance);
 						GLES3::Lightmap *lm = GLES3::LightStorage::get_singleton()->get_lightmap(li->lightmap);
 
-						if (lm->shadowmask_mode != RS::SHADOWMASK_MODE_NONE) {
+						// <ELIM> An emitter-arc layout is unreadable here: no shadowmask.
+						// if (lm->shadowmask_mode != RS::SHADOWMASK_MODE_NONE) {
+						if (lm->shadowmask_mode != RS::SHADOWMASK_MODE_NONE && !lm->emitter_arcs) {
+							// </ELIM>
 							spec_constants |= SceneShaderGLES3::USE_LIGHTMAP;
 							disable_lightmaps = false;
 
@@ -3585,7 +3588,10 @@ void RasterizerSceneGLES3::_render_list_template(RenderListParameters *p_params,
 								material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::LIGHTMAP_TEXTURE_SIZE, light_texture_size, shader->version, instance_variant, spec_constants);
 							}
 
-							material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::LIGHTMAP_SHADOWMASK_MODE, (uint32_t)lm->shadowmask_mode, shader->version, instance_variant, spec_constants);
+							// <ELIM> An emitter-arc layout is unreadable here: no shadowmask.
+							// material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::LIGHTMAP_SHADOWMASK_MODE, (uint32_t)lm->shadowmask_mode, shader->version, instance_variant, spec_constants);
+							material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::LIGHTMAP_SHADOWMASK_MODE, lm->emitter_arcs ? (uint32_t)RS::SHADOWMASK_MODE_NONE : (uint32_t)lm->shadowmask_mode, shader->version, instance_variant, spec_constants);
+							// </ELIM>
 
 							if (lm->shadow_texture.is_valid()) {
 								tex = GLES3::TextureStorage::get_singleton()->texture_get_texid(lm->shadow_texture);
