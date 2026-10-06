@@ -3127,7 +3127,12 @@ struct Task
 class TaskScheduler
 {
 public:
-	TaskScheduler() : m_shutdown(false)
+	// <ELIM> Optional zero-worker mode: every task then runs inside wait() on the
+	// calling thread, so independent atlases can be generated concurrently without
+	// each one spawning hardware_concurrency() threads.
+	// TaskScheduler() : m_shutdown(false)
+	explicit TaskScheduler(bool singleThreaded = false) : m_shutdown(false)
+	// </ELIM>
 	{
 		m_threadIndex = 0;
 		// Max with current task scheduler usage is 1 per thread + 1 deep nesting, but allow for some slop.
@@ -3139,7 +3144,10 @@ public:
 			m_groups[i].ref = 0;
 			m_groups[i].userData = nullptr;
 		}
-		m_workers.resize(std::thread::hardware_concurrency() <= 1 ? 1 : std::thread::hardware_concurrency() - 1);
+		// <ELIM> Zero-worker mode (see the constructor).
+		// m_workers.resize(std::thread::hardware_concurrency() <= 1 ? 1 : std::thread::hardware_concurrency() - 1);
+		m_workers.resize(singleThreaded ? 0 : (std::thread::hardware_concurrency() <= 1 ? 1 : std::thread::hardware_concurrency() - 1));
+		// </ELIM>
 		for (uint32_t i = 0; i < m_workers.size(); i++) {
 			new (&m_workers[i]) Worker();
 			m_workers[i].wakeup = false;
@@ -8898,6 +8906,20 @@ Atlas *Create()
 	ctx->taskScheduler = XA_NEW(internal::MemTag::Default, internal::TaskScheduler);
 	return &ctx->atlas;
 }
+
+// <ELIM> Atlas whose work all runs on the thread that calls AddMesh/Generate.
+Atlas *CreateSingleThreaded()
+{
+	Context *ctx = XA_NEW(internal::MemTag::Default, Context);
+	memset(&ctx->atlas, 0, sizeof(Atlas));
+#if XA_MULTITHREADED
+	ctx->taskScheduler = XA_NEW_ARGS(internal::MemTag::Default, internal::TaskScheduler, true);
+#else
+	ctx->taskScheduler = XA_NEW(internal::MemTag::Default, internal::TaskScheduler);
+#endif
+	return &ctx->atlas;
+}
+// </ELIM>
 
 static void DestroyOutputMeshes(Context *ctx)
 {

@@ -2276,6 +2276,213 @@ Error ArrayMesh::lightmap_unwrap_cached(const Transform3D &p_base_transform, flo
 	return OK;
 }
 
+// <ELIM> RenderingServer-free unwrap (lightmap_unwrap_surfaces).
+// lightmap_unwrap reads every surface back through the RenderingServer: off the main
+// thread each read blocks until the main thread flushes the command queue (a frame),
+// and on RD it is a GPU readback. This variant takes the surfaces as arrays, so map
+// builders can unwrap many meshes concurrently on worker threads. It mirrors
+// lightmap_unwrap_cached step for step (keep the two in sync) and returns what that
+// function would leave in an ArrayMesh built from these arrays.
+bool (*array_mesh_lightmap_unwrap_st_callback)(float p_texel_size, const float *p_vertices, const float *p_normals, int p_vertex_count, const int *p_indices, int p_index_count, float **r_uv, int **r_vertex, int *r_vertex_count, int **r_index, int *r_index_count, int *r_size_hint_x, int *r_size_hint_y) = nullptr;
+
+Dictionary ArrayMesh::lightmap_unwrap_surfaces(const TypedArray<Array> &p_surfaces, const Transform3D &p_base_transform, float p_texel_size) {
+	ERR_FAIL_NULL_V(array_mesh_lightmap_unwrap_st_callback, Dictionary());
+	ERR_FAIL_COND_V_MSG(p_texel_size <= 0.0f, Dictionary(), "Texel size must be greater than 0.");
+
+	LocalVector<float> vertices;
+	LocalVector<float> normals;
+	LocalVector<int> indices;
+	LocalVector<Pair<int, int>> uv_indices;
+
+	Vector<ArrayMeshLightmapSurface> lightmap_surfaces;
+
+	// Keep only the scale
+	Basis basis = p_base_transform.get_basis();
+	Vector3 scale = Vector3(basis.get_column(0).length(), basis.get_column(1).length(), basis.get_column(2).length());
+
+	Transform3D transform;
+	transform.scale(scale);
+
+	Basis normal_basis = transform.basis.inverse().transposed();
+
+	for (int i = 0; i < p_surfaces.size(); i++) {
+		// Encode then decode, as a surface does on its way into and back out of the
+		// RenderingServer: the unwrap must see the same quantized normals and
+		// tangents lightmap_unwrap reads back, or xatlas input (and output) differs.
+		RS::SurfaceData sd;
+		const Error enc_err = RS::get_singleton()->mesh_create_surface_data_from_arrays(&sd, RS::PRIMITIVE_TRIANGLES, p_surfaces[i]);
+		ERR_FAIL_COND_V_MSG(enc_err != OK, Dictionary(), "Invalid surface arrays for lightmap unwrap.");
+		Array arrays = RS::get_singleton()->mesh_create_arrays_from_surface_data(sd);
+
+		ArrayMeshLightmapSurface s;
+		s.primitive = Mesh::PRIMITIVE_TRIANGLES;
+		s.format = sd.format;
+		ERR_FAIL_COND_V_MSG(!(s.format & ARRAY_FORMAT_NORMAL), Dictionary(), "Normals are required for lightmap unwrap.");
+
+		SurfaceTool::create_vertex_array_from_arrays(arrays, s.vertices, &s.format);
+
+		PackedVector3Array rvertices = arrays[Mesh::ARRAY_VERTEX];
+		int vc = rvertices.size();
+
+		PackedVector3Array rnormals = arrays[Mesh::ARRAY_NORMAL];
+
+		int vertex_ofs = vertices.size() / 3;
+
+		vertices.resize((vertex_ofs + vc) * 3);
+		normals.resize((vertex_ofs + vc) * 3);
+		uv_indices.resize(vertex_ofs + vc);
+
+		for (int j = 0; j < vc; j++) {
+			Vector3 v = transform.xform(rvertices[j]);
+			Vector3 n = normal_basis.xform(rnormals[j]).normalized();
+
+			vertices[(j + vertex_ofs) * 3 + 0] = v.x;
+			vertices[(j + vertex_ofs) * 3 + 1] = v.y;
+			vertices[(j + vertex_ofs) * 3 + 2] = v.z;
+			normals[(j + vertex_ofs) * 3 + 0] = n.x;
+			normals[(j + vertex_ofs) * 3 + 1] = n.y;
+			normals[(j + vertex_ofs) * 3 + 2] = n.z;
+			uv_indices[j + vertex_ofs] = Pair<int, int>(i, j);
+		}
+
+		PackedInt32Array rindices = arrays[Mesh::ARRAY_INDEX];
+		int ic = rindices.size();
+
+		float eps = 1.19209290e-7F; // Taken from xatlas.h
+		if (ic == 0) {
+			for (int j = 0; j < vc / 3; j++) {
+				Vector3 p0 = transform.xform(rvertices[j * 3 + 0]);
+				Vector3 p1 = transform.xform(rvertices[j * 3 + 1]);
+				Vector3 p2 = transform.xform(rvertices[j * 3 + 2]);
+
+				if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
+					continue;
+				}
+
+				indices.push_back(vertex_ofs + j * 3 + 0);
+				indices.push_back(vertex_ofs + j * 3 + 1);
+				indices.push_back(vertex_ofs + j * 3 + 2);
+			}
+
+		} else {
+			for (int j = 0; j < ic / 3; j++) {
+				Vector3 p0 = transform.xform(rvertices[rindices[j * 3 + 0]]);
+				Vector3 p1 = transform.xform(rvertices[rindices[j * 3 + 1]]);
+				Vector3 p2 = transform.xform(rvertices[rindices[j * 3 + 2]]);
+
+				if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
+					continue;
+				}
+
+				indices.push_back(vertex_ofs + rindices[j * 3 + 0]);
+				indices.push_back(vertex_ofs + rindices[j * 3 + 1]);
+				indices.push_back(vertex_ofs + rindices[j * 3 + 2]);
+			}
+		}
+
+		lightmap_surfaces.push_back(s);
+	}
+
+	float *gen_uvs;
+	int *gen_vertices;
+	int *gen_indices;
+	int gen_vertex_count;
+	int gen_index_count;
+	int size_x;
+	int size_y;
+
+	bool ok = array_mesh_lightmap_unwrap_st_callback(p_texel_size, vertices.ptr(), normals.ptr(), vertices.size() / 3, indices.ptr(), indices.size(), &gen_uvs, &gen_vertices, &gen_vertex_count, &gen_indices, &gen_index_count, &size_x, &size_y);
+
+	if (!ok) {
+		return Dictionary();
+	}
+
+	LocalVector<Ref<SurfaceTool>> surfaces_tools;
+	LocalVector<int> surface_triangles;
+	surface_triangles.resize(lightmap_surfaces.size());
+
+	for (int i = 0; i < lightmap_surfaces.size(); i++) {
+		Ref<SurfaceTool> st;
+		st.instantiate();
+		st->begin(Mesh::PRIMITIVE_TRIANGLES);
+		surfaces_tools.push_back(st);
+		surface_triangles[i] = 0;
+	}
+
+	bool valid = true;
+	for (int i = 0; i < gen_index_count && valid; i += 3) {
+		for (int j = 0; j < 3; j++) {
+			if (gen_vertices[gen_indices[i + j]] < 0 || gen_vertices[gen_indices[i + j]] >= (int)uv_indices.size()) {
+				valid = false;
+			}
+		}
+		if (!valid || uv_indices[gen_vertices[gen_indices[i + 0]]].first != uv_indices[gen_vertices[gen_indices[i + 1]]].first || uv_indices[gen_vertices[gen_indices[i + 0]]].first != uv_indices[gen_vertices[gen_indices[i + 2]]].first) {
+			valid = false;
+			break;
+		}
+
+		int surface = uv_indices[gen_vertices[gen_indices[i + 0]]].first;
+		surface_triangles[surface]++;
+
+		for (int j = 0; j < 3; j++) {
+			SurfaceTool::Vertex v = lightmap_surfaces[surface].vertices[uv_indices[gen_vertices[gen_indices[i + j]]].second];
+
+			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_COLOR) {
+				surfaces_tools[surface]->set_color(v.color);
+			}
+			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_TEX_UV) {
+				surfaces_tools[surface]->set_uv(v.uv);
+			}
+			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_NORMAL) {
+				surfaces_tools[surface]->set_normal(v.normal);
+			}
+			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_TANGENT) {
+				Plane t;
+				t.normal = v.tangent;
+				t.d = v.binormal.dot(v.normal.cross(v.tangent)) < 0 ? -1 : 1;
+				surfaces_tools[surface]->set_tangent(t);
+			}
+			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_BONES) {
+				surfaces_tools[surface]->set_bones(v.bones);
+			}
+			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_WEIGHTS) {
+				surfaces_tools[surface]->set_weights(v.weights);
+			}
+
+			Vector2 uv2(gen_uvs[gen_indices[i + j] * 2 + 0], gen_uvs[gen_indices[i + j] * 2 + 1]);
+			surfaces_tools[surface]->set_uv2(uv2);
+
+			surfaces_tools[surface]->add_vertex(v.vertex);
+		}
+	}
+
+	memfree(gen_vertices);
+	memfree(gen_indices);
+	memfree(gen_uvs);
+
+	ERR_FAIL_COND_V_MSG(!valid, Dictionary(), "Lightmap unwrap returned an invalid vertex mapping.");
+
+	// One entry per input surface. An empty Array marks a surface whose triangles all
+	// degenerated: lightmap_unwrap would have dropped it (SurfaceTool::commit emits
+	// nothing for an empty tool), so the caller can keep names and materials aligned.
+	Array out_surfaces;
+	out_surfaces.resize(lightmap_surfaces.size());
+	for (unsigned int i = 0; i < surfaces_tools.size(); i++) {
+		if (surface_triangles[i] == 0) {
+			out_surfaces[i] = Array();
+			continue;
+		}
+		surfaces_tools[i]->index();
+		out_surfaces[i] = surfaces_tools[i]->commit_to_arrays();
+	}
+
+	Dictionary result;
+	result["surfaces"] = out_surfaces;
+	result["size_hint"] = Vector2i(size_x, size_y);
+	return result;
+}
+// </ELIM>
+
 void ArrayMesh::set_shadow_mesh(const Ref<ArrayMesh> &p_mesh) {
 	ERR_FAIL_COND_MSG(p_mesh == this, "Cannot set a mesh as its own shadow mesh.");
 	shadow_mesh = p_mesh;
@@ -2321,6 +2528,9 @@ void ArrayMesh::_bind_methods() {
 	ClassDB::set_method_flags(get_class_static(), StringName("regen_normal_maps"), METHOD_FLAGS_DEFAULT | METHOD_FLAG_EDITOR);
 	ClassDB::bind_method(D_METHOD("lightmap_unwrap", "transform", "texel_size"), &ArrayMesh::lightmap_unwrap);
 	ClassDB::set_method_flags(get_class_static(), StringName("lightmap_unwrap"), METHOD_FLAGS_DEFAULT | METHOD_FLAG_EDITOR);
+	// <ELIM> RenderingServer-free unwrap for map builders.
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("lightmap_unwrap_surfaces", "surfaces", "transform", "texel_size"), &ArrayMesh::lightmap_unwrap_surfaces);
+	// </ELIM>
 	ClassDB::bind_method(D_METHOD("generate_triangle_mesh"), &ArrayMesh::generate_triangle_mesh);
 
 	ClassDB::bind_method(D_METHOD("set_custom_aabb", "aabb"), &ArrayMesh::set_custom_aabb);

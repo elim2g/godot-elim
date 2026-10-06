@@ -109,6 +109,16 @@
 				Performs a UV unwrap on the [ArrayMesh] to prepare the mesh for lightmapping.
 			</description>
 		</method>
+		<method name="lightmap_unwrap_surfaces" qualifiers="static">
+			<return type="Dictionary" />
+			<param index="0" name="surfaces" type="Array[]" />
+			<param index="1" name="transform" type="Transform3D" />
+			<param index="2" name="texel_size" type="float" />
+			<description>
+				TURNT fork. Same unwrap as [method lightmap_unwrap], for triangle surfaces given as [method add_surface_from_arrays] arrays. It never touches the [RenderingServer] and runs xatlas on the calling thread only, so several calls can run concurrently on worker threads.
+				Returns [code]{"surfaces": Array, "size_hint": Vector2i}[/code], or an empty [Dictionary] on failure. [code]surfaces[/code] holds one entry per input surface: the unwrapped arrays (with [constant Mesh.ARRAY_TEX_UV2]), or an empty [Array] when every triangle of that surface was degenerate. [method lightmap_unwrap] would drop such a surface. Building an [ArrayMesh] from the non-empty entries and setting [member lightmap_size_hint] to [code]size_hint[/code] gives the same mesh [method lightmap_unwrap] produces.
+			</description>
+		</method>
 		<method name="regen_normal_maps">
 			<return type="void" />
 			<description>

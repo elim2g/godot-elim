@@ -36,6 +36,13 @@
 
 extern bool (*array_mesh_lightmap_unwrap_callback)(float p_texel_size, const float *p_vertices, const float *p_normals, int p_vertex_count, const int *p_indices, int p_index_count, const uint8_t *p_cache_data, bool *r_use_cache, uint8_t **r_mesh_cache, int *r_mesh_cache_size, float **r_uv, int **r_vertex, int *r_vertex_count, int **r_index, int *r_index_count, int *r_size_hint_x, int *r_size_hint_y);
 
+// <ELIM> Single-threaded entry point for ArrayMesh::lightmap_unwrap_surfaces.
+extern bool (*array_mesh_lightmap_unwrap_st_callback)(float p_texel_size, const float *p_vertices, const float *p_normals, int p_vertex_count, const int *p_indices, int p_index_count, float **r_uv, int **r_vertex, int *r_vertex_count, int **r_index, int *r_index_count, int *r_size_hint_x, int *r_size_hint_y);
+
+// True only while xatlas_mesh_lightmap_unwrap_st_callback runs on this thread.
+static thread_local bool xatlas_unwrap_on_calling_thread = false;
+// </ELIM>
+
 bool xatlas_mesh_lightmap_unwrap_callback(float p_texel_size, const float *p_vertices, const float *p_normals, int p_vertex_count, const int *p_indices, int p_index_count, const uint8_t *p_cache_data, bool *r_use_cache, uint8_t **r_mesh_cache, int *r_mesh_cache_size, float **r_uv, int **r_vertex, int *r_vertex_count, int **r_index, int *r_index_count, int *r_size_hint_x, int *r_size_hint_y) {
 	CryptoCore::MD5Context ctx;
 	ctx.start();
@@ -130,7 +137,10 @@ bool xatlas_mesh_lightmap_unwrap_callback(float p_texel_size, const float *p_ver
 		pack_options.blockAlign = true;
 		pack_options.texelsPerUnit = 1.0 / p_texel_size;
 
-		xatlas::Atlas *atlas = xatlas::Create();
+		// <ELIM> No worker threads when called through the single-threaded entry point.
+		// xatlas::Atlas *atlas = xatlas::Create();
+		xatlas::Atlas *atlas = xatlas_unwrap_on_calling_thread ? xatlas::CreateSingleThreaded() : xatlas::Create();
+		// </ELIM>
 
 		xatlas::AddMeshError err = xatlas::AddMesh(atlas, input_mesh, 1);
 		ERR_FAIL_COND_V_MSG(err != xatlas::AddMeshError::Success, false, xatlas::StringForEnum(err));
@@ -224,12 +234,28 @@ bool xatlas_mesh_lightmap_unwrap_callback(float p_texel_size, const float *p_ver
 	return true;
 }
 
+// <ELIM> Cache-less unwrap that keeps xatlas on the calling thread, so independent
+// meshes can be unwrapped concurrently. Same options and output as the callback above.
+static bool xatlas_mesh_lightmap_unwrap_st_callback(float p_texel_size, const float *p_vertices, const float *p_normals, int p_vertex_count, const int *p_indices, int p_index_count, float **r_uv, int **r_vertex, int *r_vertex_count, int **r_index, int *r_index_count, int *r_size_hint_x, int *r_size_hint_y) {
+	bool use_cache = false;
+	uint8_t *mesh_cache = nullptr;
+	int mesh_cache_size = 0;
+	xatlas_unwrap_on_calling_thread = true;
+	const bool ok = xatlas_mesh_lightmap_unwrap_callback(p_texel_size, p_vertices, p_normals, p_vertex_count, p_indices, p_index_count, nullptr, &use_cache, &mesh_cache, &mesh_cache_size, r_uv, r_vertex, r_vertex_count, r_index, r_index_count, r_size_hint_x, r_size_hint_y);
+	xatlas_unwrap_on_calling_thread = false;
+	return ok;
+}
+// </ELIM>
+
 void initialize_xatlas_unwrap_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
 
 	array_mesh_lightmap_unwrap_callback = xatlas_mesh_lightmap_unwrap_callback;
+	// <ELIM>
+	array_mesh_lightmap_unwrap_st_callback = xatlas_mesh_lightmap_unwrap_st_callback;
+	// </ELIM>
 }
 
 void uninitialize_xatlas_unwrap_module(ModuleInitializationLevel p_level) {

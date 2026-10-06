@@ -97,6 +97,11 @@ struct Atlas
 // Create an empty atlas.
 Atlas *Create();
 
+// <ELIM> Same as Create(), but spawns no worker threads: all work runs on the thread
+// that calls AddMesh/Generate, so separate atlases can be built concurrently.
+Atlas *CreateSingleThreaded();
+// </ELIM>
+
 void Destroy(Atlas *atlas);
 
 enum class IndexFormat
