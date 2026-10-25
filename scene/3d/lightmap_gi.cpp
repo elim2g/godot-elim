@@ -1130,6 +1130,9 @@ struct SurfaceLightIslandLight {
 	// Island index. The bake ignores it; the debug hook returns it so a
 	// visualizer can colour footprints by island.
 	int32_t component = -1;
+	// Emitter fixture: islands that touch and emit alike (the faces of one
+	// emissive brush, or the pieces chunking cut it into) share it.
+	int32_t group = -1;
 	// True when this island sits in face-to-face contact with solid geometry
 	// (emits into solid). The bake skips it at emission; the debug hook returns
 	// it with the flag set so the cull is visible in the visualizer.
@@ -1219,6 +1222,7 @@ struct SurfaceLightIsland {
 	float area = 0.0f;
 	Color color;
 	float energy = 0.0f;
+	int32_t group = -1; // Emitter fixture, see the grouping pass.
 	LocalVector<SurfaceLightTri> tris;
 };
 
@@ -1990,6 +1994,41 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 		return;
 	}
 
+	// Emitter fixtures: islands sharing a welded vertex with identical emission are
+	// one fixture. Across surfaces on purpose: chunking splits one strip over meshes.
+	{
+		LocalVector<int32_t> group_parent;
+		group_parent.resize(islands.size());
+		for (uint32_t ii = 0; ii < islands.size(); ii++) {
+			group_parent[ii] = (int32_t)ii;
+		}
+		HashMap<SurfaceLightEdgeKey, int32_t, SurfaceLightEdgeKeyHasher> vert_owner;
+		for (uint32_t ii = 0; ii < islands.size(); ii++) {
+			for (const SurfaceLightTri &tri : islands[ii].tris) {
+				for (int k = 0; k < 3; k++) {
+					const SurfaceLightEdgeKey vk = _surface_light_edge_key(tri.v[k], tri.v[k]);
+					HashMap<SurfaceLightEdgeKey, int32_t, SurfaceLightEdgeKeyHasher>::Iterator it = vert_owner.find(vk);
+					if (it == vert_owner.end()) {
+						vert_owner.insert(vk, (int32_t)ii);
+						continue;
+					}
+					const SurfaceLightIsland &other = islands[it->value];
+					if (other.color != islands[ii].color || other.energy != islands[ii].energy) {
+						continue;
+					}
+					const int32_t ra = _surface_light_uf_find(group_parent.ptr(), (int32_t)ii);
+					const int32_t rb = _surface_light_uf_find(group_parent.ptr(), it->value);
+					if (ra != rb) {
+						group_parent[ra] = rb;
+					}
+				}
+			}
+		}
+		for (uint32_t ii = 0; ii < islands.size(); ii++) {
+			islands[ii].group = _surface_light_uf_find(group_parent.ptr(), (int32_t)ii);
+		}
+	}
+
 	// PHASE 2: one analytic polygon light per island. Convex islands (brush
 	// faces, however T-junction-fragmented) collapse to their in-plane convex
 	// hull fan — exact and minimal. Non-convex islands (coplanar-merged
@@ -2030,6 +2069,7 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 		light.color = isl.color;
 		light.energy = isl.energy;
 		light.component = (int32_t)ci;
+		light.group = isl.group;
 		// <ELIM> Occluded = the fraction of the island's AREA pressed face-to-face
 		// against solid, not a single centroid probe. v1 tested one point per PATCH
 		// (dozens per island), so a point sample was a local decision. v2 emits ONE
@@ -2190,6 +2230,21 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 	if (!p_capture_geometry) {
 		print_line(vformat("LightmapGI: surface-light collector — %d island light(s), total emissive area %.1f m^2, %d polygon vert(s), %d hull-fallback island(s), %d occluded island(s) culled.",
 				(int)r_islands.size(), total_area, (int)total_poly_verts, (int)hull_fallback_islands, (int)occluded_islands));
+		// <ELIM> Emitter fixtures (islands grouped for emitter-arc selection).
+		HashSet<int32_t> fixtures;
+		int multi_face = 0;
+		HashMap<int32_t, int> fixture_faces;
+		for (const SurfaceLightIslandLight &isl : r_islands) {
+			fixtures.insert(isl.group);
+			fixture_faces[isl.group] += 1;
+		}
+		for (const KeyValue<int32_t, int> &kv : fixture_faces) {
+			if (kv.value > 1) {
+				multi_face++;
+			}
+		}
+		print_line(vformat("LightmapGI: emitter fixtures — %d island(s) in %d fixture(s), %d of them with more than one island.", (int)r_islands.size(), fixtures.size(), multi_face));
+		// </ELIM>
 		print_line(vformat("LightmapGI: surface-light simplification — %d non-convex island(s) rebuilt from their boundary (%d member tri(s) -> %d exact tri(s)), %d could not be rebuilt.",
 				(int)simplified_islands, (int)simplified_tris_in, (int)simplified_tris_out, (int)simplify_failed_islands));
 		// <ELIM> Convex-merge rescue of the islands the boundary rebuild bailed on.
@@ -2648,8 +2703,17 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 		// so the centroid distance test is conservative for texels near a big
 		// island's edge. Islands flagged occluded (face-to-face contact with
 		// solid) emit into solid and are skipped.
-		int emitted_islands = 0;
+		// Submitted grouped by fixture: the direct pass sums a fixture's lights as a
+		// contiguous run.
+		LocalVector<uint64_t> island_order; // (group << 32) | island index
+		island_order.resize(surface_light_islands.size());
 		for (int i = 0; i < surface_light_islands.size(); i++) {
+			island_order[i] = ((uint64_t)MAX(surface_light_islands[i].group, 0) << 32) | (uint64_t)i;
+		}
+		island_order.sort();
+		int emitted_islands = 0;
+		for (const uint64_t order_key : island_order) {
+			const int i = (int)(order_key & 0xFFFFFFFFu);
 			const SurfaceLightIslandLight &sl = surface_light_islands[i];
 			if (sl.occluded) {
 				continue;
@@ -2657,7 +2721,7 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 			const float e_eff = sl.energy * SURFACE_LIGHT_ENERGY_SCALE * sl.radiance_scale;
 			const float peak = e_eff * MAX(sl.color.r, MAX(sl.color.g, sl.color.b));
 			const float range = CLAMP(Math::sqrt(MAX(0.0f, peak * sl.area / SURFACE_LIGHT_CUTOFF)), 1.0f, SURFACE_LIGHT_RANGE_MAX) + sl.bounding_radius;
-			lightmapper->add_area_poly_light(vformat("surface_light_island_%d", i), true, sl.pos, sl.normal, sl.color, e_eff, 1.0f, sl.area, range, sl.poly_verts);
+			lightmapper->add_area_poly_light(vformat("surface_light_island_%d", i), true, sl.pos, sl.normal, sl.color, e_eff, 1.0f, sl.area, range, sl.poly_verts, (uint32_t)MAX(sl.group, 0));
 			emitted_islands++;
 		}
 		if (emitted_islands > 0) {

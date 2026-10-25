@@ -196,7 +196,9 @@ public:
 	// one-sided Lambertian emitter with exact edge-sum irradiance and
 	// ray-estimated visibility; p_range is the energy-derived contribution
 	// cutoff (should include the island bounding radius).
-	virtual void add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts) = 0;
+	// p_group: lights sharing it are one fixture (the faces of one emissive
+	// brush); emitter-arc selection compares fixtures, not faces.
+	virtual void add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts, uint32_t p_group) = 0;
 	// </ELIM>
 	virtual void add_probe(const Vector3 &p_position) = 0;
 	virtual BakeError bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function = nullptr, void *p_step_userdata = nullptr, float p_exposure_normalization = 1.0, float p_supersampling_factor = 1.0, /* <ELIM> */ float p_bounce_saturation = 1.0f /* </ELIM> */) = 0;

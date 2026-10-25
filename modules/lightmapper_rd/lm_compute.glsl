@@ -78,21 +78,46 @@ layout(set = 1, binding = 5) uniform texture2D environment;
 #endif
 
 // <ELIM> Emitter arcs, read-modify-written across light batches like the shadowmask:
-// arc_a = (A.xy hemi-octahedral, half-width, 1 = texel processed),
-// arc_b = (B.xy hemi-octahedral, log intensity, log irradiance = selection key).
+// arc_a = (A.xy hemi-octahedral, half-width, 1 + log runner-up intensity;
+//          0 = texel not processed),
+// arc_b = (B.xy hemi-octahedral, log intensity, log intensity = selection key).
 #if defined(MODE_DIRECT_LIGHT) && defined(USE_EMITTER_ARCS)
-layout(rgba8, set = 1, binding = 6) uniform restrict image2DArray emitter_arc_a;
-layout(rgba8, set = 1, binding = 7) uniform restrict image2DArray emitter_arc_b;
+layout(rgba16f, set = 1, binding = 6) uniform restrict image2DArray emitter_arc_a;
+layout(rgba16f, set = 1, binding = 7) uniform restrict image2DArray emitter_arc_b;
 #endif
 
 // Packs the shipped layers: (A.xy, half-width, sun visibility) and
-// (B.xy, 0, log intensity), dilated into the chart gutters.
+// (B.xy, runner-up ratio, log intensity), dilated into the chart gutters. The
+// runner-up ratio is the second strongest fixture's specular intensity over the
+// winner's: 0 where one light dominates, 1 where the choice of light is a tie.
 #ifdef MODE_PACK_EMITTER_ARCS
 layout(rgba8, set = 1, binding = 0) uniform restrict writeonly image2DArray dest_arc_a;
 layout(rgba8, set = 1, binding = 1) uniform restrict writeonly image2DArray dest_arc_b;
 layout(set = 1, binding = 2) uniform texture2DArray source_arc_a;
 layout(set = 1, binding = 3) uniform texture2DArray source_arc_b;
 layout(set = 1, binding = 4) uniform texture2DArray source_shadowmask;
+#endif
+// </ELIM>
+
+// <ELIM> Emitter-arc log encoding, shared by the direct pass and the pack pass.
+#if (defined(MODE_DIRECT_LIGHT) && defined(USE_EMITTER_ARCS)) || defined(MODE_PACK_EMITTER_ARCS)
+const float ARC_LOG_MIN = -10.0;
+const float ARC_LOG_RANGE = 20.0;
+
+// log2 over [ARC_LOG_MIN, ARC_LOG_MIN + ARC_LOG_RANGE]; 0 means no light.
+float arc_encode_log(float p_value) {
+	if (p_value <= exp2(ARC_LOG_MIN)) {
+		return 0.0;
+	}
+	return clamp((log2(p_value) - ARC_LOG_MIN) / ARC_LOG_RANGE, 1.0 / 255.0, 1.0);
+}
+
+float arc_decode_log(float p_enc) {
+	if (p_enc <= 0.0) {
+		return 0.0;
+	}
+	return exp2(p_enc * ARC_LOG_RANGE + ARC_LOG_MIN);
+}
 #endif
 // </ELIM>
 
@@ -691,8 +716,6 @@ vec3 surface_light_tri_irradiance(uint p_base, uint p_tri, vec3 p_position, vec3
 // Fixed oblique reference: the frame is singular only for normals parallel to it,
 // which axis-aligned and 45-degree brush faces never are.
 const vec3 ARC_FRAME_REF = vec3(0.26726124, 0.53452248, 0.80178373); // normalize(1, 2, 3)
-const float ARC_LOG_MIN = -10.0;
-const float ARC_LOG_RANGE = 20.0;
 const float ARC_WIDTH_MAX = 1.5707963; // half pi
 
 vec2 arc_encode_dir(vec3 p_dir, vec3 p_normal) {
@@ -703,12 +726,33 @@ vec2 arc_encode_dir(vec3 p_dir, vec3 p_normal) {
 	return vec2(l.x + l.y, l.x - l.y) * 0.5 + 0.5;
 }
 
-// log2 over [ARC_LOG_MIN, ARC_LOG_MIN + ARC_LOG_RANGE]; 0 means no light.
-float arc_encode_log(float p_value) {
-	if (p_value <= exp2(ARC_LOG_MIN)) {
-		return 0.0;
+// The specular weight of the light trace_direct_light last returned, as a factor
+// on its irradiance: radiance * solid angle over radiance * projected solid angle,
+// i.e. one over the cosine of its direction at the receiver. Continuous in the
+// receiver position, so a fixture's summed intensity has no steps.
+float arc_spec_scale = 1.0;
+
+// Fixture of light p_i: area lights carry it (inv_spot_attenuation, bit-cast; the
+// lights of one fixture are submitted contiguously), any other light is its own.
+uint arc_fixture(uint p_i) {
+	if (lights.data[p_i].type == LIGHT_TYPE_AREA_POLY) {
+		return floatBitsToUint(lights.data[p_i].inv_spot_attenuation);
 	}
-	return clamp((log2(p_value) - ARC_LOG_MIN) / ARC_LOG_RANGE, 1.0 / 255.0, 1.0);
+	return 0x80000000u | p_i;
+}
+
+// Ends the current fixture's run: it becomes the winner or a runner-up candidate.
+// Fixtures compete on specular intensity, the quantity the arc draws, so where the
+// winner changes both candidates are equally bright and the switch has no step.
+void arc_close_run(float p_run_sum, uint p_run_light, vec3 p_run_dir, inout float r_best, inout float r_second, inout uint r_best_light, inout vec3 r_best_dir) {
+	if (p_run_sum > r_best) {
+		r_second = max(r_second, r_best);
+		r_best = p_run_sum;
+		r_best_light = p_run_light;
+		r_best_dir = p_run_dir;
+	} else {
+		r_second = max(r_second, p_run_sum);
+	}
 }
 
 vec3 arc_direction(vec3 p_center, vec3 p_tangent, vec3 p_plane_normal, float p_phi, float p_elevation) {
@@ -719,10 +763,9 @@ vec3 arc_direction(vec3 p_center, vec3 p_tangent, vec3 p_plane_normal, float p_p
 // fitted with a great-circle arc: the circle through the light centroid's
 // direction along the polygon's in-plane major axis (stored after its triangles
 // by add_area_poly_light), spanning the angular extent of the clipped corners,
-// widened by their angular spread off the circle. Also returns the clipped
-// polygon's solid angle and projected solid angle. False when nothing is above
+// widened by their angular spread off the circle. False when nothing is above
 // the horizon.
-bool area_light_arc(uint p_light, vec3 p_position, vec3 p_normal, out vec3 r_a, out vec3 r_b, out float r_width, out float r_solid_angle, out float r_proj_solid_angle) {
+bool area_light_arc(uint p_light, vec3 p_position, vec3 p_normal, out vec3 r_a, out vec3 r_b, out float r_width) {
 	Light light_data = lights.data[p_light];
 	uint base = light_data.pad;
 	uint tri_count = floatBitsToUint(light_data.cos_spot_angle);
@@ -741,8 +784,6 @@ bool area_light_arc(uint p_light, vec3 p_position, vec3 p_normal, out vec3 r_a, 
 	float phi_max = -1e9;
 	float el_min = 1e9;
 	float el_max = -1e9;
-	r_solid_angle = 0.0;
-	vec3 e_vec = vec3(0.0);
 	for (uint t = 0u; t < tri_count; t++) {
 		vec3 clipped[4];
 		int clipped_count = surface_light_tri_clip(base, t, p_position, p_normal, clipped);
@@ -758,18 +799,7 @@ bool area_light_arc(uint p_light, vec3 p_position, vec3 p_normal, out vec3 r_a, 
 			el_min = min(el_min, el);
 			el_max = max(el_max, el);
 		}
-		// Solid angle of the clipped corners as a fan (Van Oosterom-Strackee).
-		for (int k = 1; k + 1 < clipped_count; k++) {
-			vec3 u0 = clipped[0];
-			vec3 u1 = clipped[k];
-			vec3 u2 = clipped[k + 1];
-			float num = abs(dot(u0, cross(u1, u2)));
-			float den = 1.0 + dot(u0, u1) + dot(u1, u2) + dot(u2, u0);
-			r_solid_angle += 2.0 * atan(num, den);
-		}
-		e_vec += surface_light_edge_sum(clipped, clipped_count);
 	}
-	r_proj_solid_angle = dot(e_vec, p_normal);
 	if (phi_min > phi_max) {
 		return false;
 	}
@@ -939,6 +969,9 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 		r_light_dir = normalize(e_vec);
 		r_light = light_data.energy * poly_irr * vis * vis_color;
 		r_shadow = vis;
+#if defined(MODE_DIRECT_LIGHT) && defined(USE_EMITTER_ARCS)
+		arc_spec_scale = min(length(e_vec) / poly_irr, 64.0);
+#endif
 		return;
 	// </ELIM>
 	} else {
@@ -972,6 +1005,9 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 	if (attenuation <= 0.0001) {
 		return;
 	}
+#if defined(MODE_DIRECT_LIGHT) && defined(USE_EMITTER_ARCS)
+	arc_spec_scale = 1.0 / max(dot(p_normal, r_light_dir), 0.01);
+#endif
 
 	// <ELIM> The AA/penumbra sampling below jitters ray origins across the
 	// texel footprint and advances them along the ray by bias + |disk_sample|.
@@ -1392,11 +1428,20 @@ void main() {
 	float shadowmask_value = 0.0f;
 #endif
 
-	// <ELIM> This batch's dominant emitter candidate (see the emitter-arc helpers).
+	// <ELIM> This batch's dominant emitter fixture: its summed specular intensity
+	// (radiance * solid angle * visibility), and the strongest of its lights, whose
+	// arc stands for it. The run is the fixture
+	// being summed (see the emitter-arc helpers).
 #ifdef USE_EMITTER_ARCS
 	float arc_best_luma = 0.0;
+	float arc_second_luma = 0.0;
 	uint arc_best_light = 0u;
 	vec3 arc_best_dir = vec3(0.0);
+	uint arc_run_fixture = 0xFFFFFFFFu;
+	float arc_run_sum = 0.0;
+	float arc_run_peak = 0.0;
+	uint arc_run_light = 0u;
+	vec3 arc_run_dir = vec3(0.0);
 #endif
 	// </ELIM>
 
@@ -1467,20 +1512,34 @@ void main() {
 		}
 #endif
 
-		// <ELIM> Dominant emitter: the static non-directional light delivering the
-		// most irradiance (visibility included). The sun has its own mask.
+		// <ELIM> Dominant emitter: the static non-directional fixture with the most
+		// specular intensity (visibility included). The sun has its own mask.
 #ifdef USE_EMITTER_ARCS
 		if (lights.data[i].static_bake && lights.data[i].type != LIGHT_TYPE_DIRECTIONAL) {
-			float light_luma = dot(light, vec3(0.2126, 0.7152, 0.0722));
-			if (light_luma > arc_best_luma) {
-				arc_best_luma = light_luma;
-				arc_best_light = i;
-				arc_best_dir = light_dir;
+			float light_luma = dot(light, vec3(0.2126, 0.7152, 0.0722)) * arc_spec_scale;
+			uint fixture = arc_fixture(i);
+			if (fixture != arc_run_fixture) {
+				arc_close_run(arc_run_sum, arc_run_light, arc_run_dir, arc_best_luma, arc_second_luma, arc_best_light, arc_best_dir);
+				arc_run_fixture = fixture;
+				arc_run_sum = 0.0;
+				arc_run_peak = 0.0;
+			}
+			arc_run_sum += light_luma;
+			if (light_luma > arc_run_peak) {
+				arc_run_peak = light_luma;
+				arc_run_light = i;
+				arc_run_dir = light_dir;
 			}
 		}
 #endif
 		// </ELIM>
 	}
+
+	// <ELIM>
+#ifdef USE_EMITTER_ARCS
+	arc_close_run(arc_run_sum, arc_run_light, arc_run_dir, arc_best_luma, arc_second_luma, arc_best_light, arc_best_dir);
+#endif
+	// </ELIM>
 
 	light_for_bounces *= bake_params.exposure_normalization;
 	// <ELIM> Batch-accumulate into dest_light (the bounce source). The first light
@@ -1545,43 +1604,43 @@ void main() {
 	{
 		ivec3 arc_pos = ivec3(atlas_pos, params.atlas_slice);
 		float prev_key = first_light_batch ? 0.0 : imageLoad(emitter_arc_b, arc_pos).a;
-		float key = arc_encode_log(arc_best_luma * bake_params.exposure_normalization);
+		vec4 prev_a = first_light_batch ? vec4(0.5, 0.5, 0.0, 1.0) : imageLoad(emitter_arc_a, arc_pos);
+		float batch_best = arc_best_luma * bake_params.exposure_normalization;
+		float second = max(arc_decode_log(prev_a.a - 1.0), arc_second_luma * bake_params.exposure_normalization);
+		second = max(second, min(arc_decode_log(prev_key), batch_best));
+		float second_enc = 1.0 + arc_encode_log(second);
+		float key = arc_encode_log(batch_best);
 		bool stored = false;
 		if (key > prev_key) {
 			vec3 arc_a;
 			vec3 arc_b;
 			float width;
-			float intensity = 0.0;
+			float intensity = arc_best_luma;
 			bool fitted;
 			if (lights.data[arc_best_light].type == LIGHT_TYPE_AREA_POLY) {
-				float solid_angle;
-				float proj_solid_angle;
-				fitted = area_light_arc(arc_best_light, position, normal, arc_a, arc_b, width, solid_angle, proj_solid_angle);
-				// The bake's irradiance is radiance * projected solid angle * visibility;
-				// the specular needs radiance * solid angle * visibility.
-				if (fitted && proj_solid_angle > 1e-6) {
-					intensity = arc_best_luma * min(solid_angle / proj_solid_angle, 64.0);
-				}
+				fitted = area_light_arc(arc_best_light, position, normal, arc_a, arc_b, width);
 			} else {
 				// Punctual: a zero-length arc, widened by the light's radius.
 				arc_a = arc_best_dir;
 				arc_b = arc_best_dir;
 				float light_dist = max(distance(lights.data[arc_best_light].position, position), 1e-4);
 				width = atan(lights.data[arc_best_light].size, light_dist);
-				intensity = arc_best_luma / max(dot(normal, arc_best_dir), 0.01);
 				fitted = true;
 			}
 			float intensity_enc = arc_encode_log(intensity * bake_params.exposure_normalization);
 			if (fitted && intensity_enc > 0.0) {
-				imageStore(emitter_arc_a, arc_pos, vec4(arc_encode_dir(arc_a, normal), clamp(width / ARC_WIDTH_MAX, 0.0, 1.0), 1.0));
+				imageStore(emitter_arc_a, arc_pos, vec4(arc_encode_dir(arc_a, normal), clamp(width / ARC_WIDTH_MAX, 0.0, 1.0), second_enc));
 				imageStore(emitter_arc_b, arc_pos, vec4(arc_encode_dir(arc_b, normal), intensity_enc, key));
 				stored = true;
 			}
 		}
-		if (!stored && first_light_batch) {
-			// Processed, no emitter (yet): straight up, zero intensity.
-			imageStore(emitter_arc_a, arc_pos, vec4(0.5, 0.5, 0.0, 1.0));
-			imageStore(emitter_arc_b, arc_pos, vec4(0.5, 0.5, 0.0, 0.0));
+		if (!stored) {
+			// Keep the previous winner (straight up, zero intensity on the first
+			// batch), with this batch's lights in the runner-up.
+			imageStore(emitter_arc_a, arc_pos, vec4(prev_a.rgb, second_enc));
+			if (first_light_batch) {
+				imageStore(emitter_arc_b, arc_pos, vec4(0.5, 0.5, 0.0, 0.0));
+			}
 		}
 	}
 #endif
@@ -2016,8 +2075,13 @@ void main() {
 		if (bake_params.shadowmask_light_idx >= 0) {
 			sun = texelFetch(sampler2DArray(source_shadowmask, linear_sampler), arc_pos, 0).r;
 		}
+		float runner_up = 0.0;
+		float winner = arc_decode_log(arc_b.a);
+		if (winner > 0.0) {
+			runner_up = clamp(arc_decode_log(arc_a.a - 1.0) / winner, 0.0, 1.0);
+		}
 		imageStore(dest_arc_a, arc_pos, vec4(arc_a.rgb, sun));
-		imageStore(dest_arc_b, arc_pos, vec4(arc_b.rg, 0.0, arc_b.b));
+		imageStore(dest_arc_b, arc_pos, vec4(arc_b.rg, runner_up, arc_b.b));
 	}
 #endif
 	// </ELIM>

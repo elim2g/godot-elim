@@ -158,7 +158,7 @@ void LightmapperRD::add_spot_light(const String &p_name, bool p_static, const Ve
 // stored there, but the shader now hands rays out by each triangle's analytic
 // contribution to the receiving texel, which no CPU-side table can express.
 // lights.sort() is safe: the reference travels inside the struct.
-void LightmapperRD::add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts) {
+void LightmapperRD::add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts, uint32_t p_group) {
 	const int tri_count = p_poly_verts.size() / 3;
 	ERR_FAIL_COND_MSG(tri_count < 1 || p_poly_verts.size() % 3 != 0, vformat("Area poly light '%s' needs a non-empty multiple-of-3 vertex list (got %d).", p_name, p_poly_verts.size()));
 
@@ -196,6 +196,8 @@ void LightmapperRD::add_area_poly_light(const String &p_name, bool p_static, con
 	l.pad = poly_verts_data.size() / 4;
 	uint32_t tc_bits = (uint32_t)tri_count;
 	memcpy(&l.cos_spot_angle, &tc_bits, sizeof(uint32_t));
+	// Unused by area lights otherwise; the direct pass reads it as the fixture id.
+	memcpy(&l.inv_spot_attenuation, &p_group, sizeof(uint32_t));
 
 	float bounding_radius = 0.0f;
 	poly_verts_data.reserve(poly_verts_data.size() + tri_count * 12);
@@ -1529,9 +1531,11 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		}
 
 		// <ELIM> Emitter arcs. Cleared to alpha 0 = "not processed" so the pack pass
-		// can dilate into the gutters.
+		// can dilate into the gutters. Both are half float: A's alpha also carries the
+		// runner-up's irradiance across light batches; B's alpha is the selection key,
+		// whose precision the runner-up ratio needs.
 		if (bake_emitter_arcs) {
-			tf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+			tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 			arc_a_tex = rd->texture_create(tf, RD::TextureView());
 			rd->texture_clear(arc_a_tex, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
 			arc_b_tex = rd->texture_create(tf, RD::TextureView());
@@ -2622,7 +2626,8 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		// mask (the arc textures stand in when there is no sun; the shader ignores
 		// it then) and dilate them. The direct-pass state is freed straight after.
 		if (bake_emitter_arcs) {
-			const RD::TextureFormat arc_tf = rd->texture_get_format(arc_a_tex);
+			RD::TextureFormat arc_tf = rd->texture_get_format(arc_b_tex);
+			arc_tf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM; // As shipped
 			arc_out_a_tex = rd->texture_create(arc_tf, RD::TextureView());
 			arc_out_b_tex = rd->texture_create(arc_tf, RD::TextureView());
 			error = _pack_emitter_arcs(rd, compute_shader, compute_base_uniform_set, push_constant, arc_a_tex, arc_b_tex, p_bake_shadowmask ? shadowmask_tex : arc_a_tex, arc_out_a_tex, arc_out_b_tex, atlas_size, atlas_slices);

@@ -1220,6 +1220,11 @@ const vec3 EMITTER_ARC_FRAME_REF = vec3(0.26726124, 0.53452248, 0.80178373); // 
 const float EMITTER_ARC_LOG_MIN = -10.0;
 const float EMITTER_ARC_LOG_RANGE = 20.0;
 const float EMITTER_ARC_WIDTH_MAX = 1.5707963; // half pi
+// The arc fades out as the texel's runner-up emitter closes on its light (B.z, the
+// runner-up's intensity over the winner's; 1 is a tie), so the switch from one
+// light's arc to the next is a dip instead of a cut. Bakes before the ratio store 0.
+const float EMITTER_ARC_RIVAL_FADE_START = 0.5;
+const float EMITTER_ARC_RIVAL_FADE_END = 1.0;
 
 vec3 emitter_arc_decode_dir(vec2 p_enc, vec3 p_t, vec3 p_b, vec3 p_n) {
 	vec2 e = p_enc * 2.0 - 1.0;
@@ -2917,6 +2922,7 @@ void fragment_shader(in SceneData scene_data) {
 			if (arc_b_tex.a > 0.0) {
 				const vec4 arc_a_tex = lm_arc_layer_a_valid ? lm_arc_layer_a : textureLod(sampler2DArray(lightmap_textures[MAX_LIGHTMAP_TEXTURES + arc_lm], SAMPLER_LINEAR_CLAMP), vec3(arc_uv, float(arc_slice * 2u)), 0.0);
 				float arc_intensity = exp2(arc_b_tex.a * EMITTER_ARC_LOG_RANGE + EMITTER_ARC_LOG_MIN) * lightmaps.data[arc_lm].exposure_normalization;
+				arc_intensity *= 1.0 - smoothstep(EMITTER_ARC_RIVAL_FADE_START, EMITTER_ARC_RIVAL_FADE_END, arc_b_tex.z);
 
 				// The bake's frame, rebuilt from the geometric normal in view space
 				// (view_matrix rows rotate world directions into view space).
