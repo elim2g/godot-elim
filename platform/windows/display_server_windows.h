@@ -32,6 +32,9 @@
 
 #include "crash_handler_windows.h"
 #include "key_mapping_windows.h"
+// <ELIM> Raw mouse input on its own thread
+#include "raw_mouse_input_windows.h"
+// </ELIM>
 #include "tts_windows.h"
 
 #include "core/config/project_settings.h"
@@ -475,6 +478,10 @@ class DisplayServerWindows : public DisplayServer {
 	int restore_mouse_trails = 0;
 
 	bool use_raw_input = false;
+	// <ELIM> Raw mouse input on its own thread; the packet count is for Insights
+	RawMouseInputWindows raw_mouse;
+	uint32_t raw_mouse_packets = 0;
+	// </ELIM>
 	bool drop_events = false;
 	bool in_dispatch_input_event = false;
 
@@ -501,6 +508,9 @@ class DisplayServerWindows : public DisplayServer {
 	void _set_mouse_mode_impl(MouseMode p_mode);
 	WindowID _get_focused_window_or_popup() const;
 	void _register_raw_input_devices(WindowID p_target_window);
+	// <ELIM> Raw mouse input on its own thread
+	void _deliver_raw_mouse_motion(const Vector2i &p_motion);
+	// </ELIM>
 	bool _has_moving_window() const;
 
 	void _process_activate_event(WindowID p_window_id);

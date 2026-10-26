@@ -40,6 +40,10 @@
 #include "core/io/marshalls.h"
 #include "core/io/xml_parser.h"
 #include "core/os/main_loop.h"
+// <ELIM> TURNT Insights: message pump and raw input zones
+#include "core/profiling/insights_singleton.h"
+#include "core/profiling/profiling.h"
+// </ELIM>
 #include "core/version.h"
 #include "drivers/png/png_driver_common.h"
 #include "main/main.h"
@@ -247,6 +251,13 @@ void DisplayServerWindows::_set_mouse_mode_impl(MouseMode p_mode) {
 			SetCapture(wd.hWnd);
 
 			_register_raw_input_devices(window_id);
+
+			// <ELIM> A cursor pinned to the centre pixel never moves, so it generates no legacy mouse messages
+			if (use_raw_input) {
+				const RECT center_clip = { pos.x, pos.y, pos.x + 1, pos.y + 1 };
+				ClipCursor(&center_clip);
+			}
+			// </ELIM>
 		}
 	} else {
 		// Mouse is free to move around (not captured or confined).
@@ -260,6 +271,10 @@ void DisplayServerWindows::_set_mouse_mode_impl(MouseMode p_mode) {
 
 		_register_raw_input_devices(INVALID_WINDOW_ID);
 	}
+
+	// <ELIM> Raw mouse input on its own thread
+	raw_mouse.set_capture(p_mode == MOUSE_MODE_CAPTURED && windows.has(MAIN_WINDOW_ID));
+	// </ELIM>
 
 	if (p_mode == MOUSE_MODE_VISIBLE || p_mode == MOUSE_MODE_CONFINED) {
 		// Show cursor.
@@ -309,11 +324,49 @@ void DisplayServerWindows::_register_raw_input_devices(WindowID p_target_window)
 		rid[1].hwndTarget = nullptr;
 	}
 
-	if (RegisterRawInputDevices(rid, 2, sizeof(rid[0])) == FALSE) {
+	// <ELIM> The raw mouse thread owns mouse registration when it runs
+	// if (RegisterRawInputDevices(rid, 2, sizeof(rid[0])) == FALSE) {
+	const UINT first_device = raw_mouse.is_running() ? 1 : 0;
+	if (RegisterRawInputDevices(rid + first_device, 2 - first_device, sizeof(rid[0])) == FALSE) {
+		// </ELIM>
 		// Registration failed.
 		use_raw_input = false;
 	}
 }
+
+// <ELIM> Raw mouse input on its own thread: one merged motion event per frame
+void DisplayServerWindows::_deliver_raw_mouse_motion(const Vector2i &p_motion) {
+	if (p_motion == Vector2i() || mouse_mode != MOUSE_MODE_CAPTURED) {
+		return;
+	}
+
+	const WindowID window_id = _get_focused_window_or_popup();
+	const RBMap<WindowID, WindowData>::Element *window = windows.find(window_id);
+	if (window == nullptr || !(window->value().window_focused || window->value().is_popup)) {
+		return;
+	}
+
+	const BitField<WinKeyModifierMask> mods = _get_mods();
+	const BitField<MouseButtonMask> buttons = mouse_get_button_state();
+	const Point2i window_center(window->value().width / 2, window->value().height / 2);
+
+	Ref<InputEventMouseMotion> mm;
+	mm.instantiate();
+	mm->set_window_id(window_id);
+	mm->set_ctrl_pressed(mods.has_flag(WinKeyModifierMask::CTRL));
+	mm->set_shift_pressed(mods.has_flag(WinKeyModifierMask::SHIFT));
+	mm->set_alt_pressed(mods.has_flag(WinKeyModifierMask::ALT));
+	mm->set_meta_pressed(mods.has_flag(WinKeyModifierMask::META));
+	mm->set_pressure(buttons.has_flag(MouseButtonMask::LEFT) ? 1.0f : 0.0f);
+	mm->set_button_mask(buttons);
+	mm->set_position(window_center);
+	mm->set_global_position(window_center);
+	mm->set_relative(p_motion);
+	mm->set_relative_screen_position(p_motion);
+
+	Input::get_singleton()->parse_input_event(mm);
+}
+// </ELIM>
 
 void DisplayServerWindows::initialize_tts() const {
 	const_cast<DisplayServerWindows *>(this)->tts = memnew(TTS_Windows);
@@ -3865,10 +3918,26 @@ void DisplayServerWindows::process_events() {
 
 	_THREAD_SAFE_LOCK_
 	MSG msg = {};
-	while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-		TranslateMessage(&msg);
-		DispatchMessageW(&msg);
+	// <ELIM> Time the pump, deliver the raw mouse thread's motion, and count both for Insights
+	uint32_t pumped_messages = 0;
+	{
+		GodotProfileZone("ds: message pump");
+		while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+			TranslateMessage(&msg);
+			DispatchMessageW(&msg);
+			pumped_messages++;
+		}
 	}
+	if (raw_mouse.is_running()) {
+		_deliver_raw_mouse_motion(raw_mouse.consume_motion());
+		raw_mouse_packets += raw_mouse.take_packet_count();
+	}
+	if (TntInsights::wants_counters()) {
+		GodotProfileCounter("Pumped Messages", pumped_messages);
+		GodotProfileCounter("Raw Mouse Packets", raw_mouse_packets);
+	}
+	raw_mouse_packets = 0;
+	// </ELIM>
 	_THREAD_SAFE_UNLOCK_
 
 	if (tts) {
@@ -5010,6 +5079,10 @@ LRESULT DisplayServerWindows::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 				break;
 			}
 
+			// <ELIM> TURNT Insights: per-packet cost of the raw input path
+			GodotProfileZone("ds: WM_INPUT");
+			// </ELIM>
+
 			UINT dwSize;
 
 			GetRawInputData((HRAWINPUT)lParam, RID_INPUT, nullptr, &dwSize, sizeof(RAWINPUTHEADER));
@@ -5054,6 +5127,9 @@ LRESULT DisplayServerWindows::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 					}
 				}
 			} else if (mouse_mode == MOUSE_MODE_CAPTURED && raw->header.dwType == RIM_TYPEMOUSE) {
+				// <ELIM> TURNT Insights: raw mouse packet count per frame
+				raw_mouse_packets++;
+				// </ELIM>
 				Ref<InputEventMouseMotion> mm;
 				mm.instantiate();
 
@@ -5920,7 +5996,15 @@ LRESULT DisplayServerWindows::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 					crect.bottom -= off.y;
 					ClientToScreen(window.hWnd, (POINT *)&crect.left);
 					ClientToScreen(window.hWnd, (POINT *)&crect.right);
+					// <ELIM> Keep a captured cursor pinned to the centre pixel
+					// ClipCursor(&crect);
+					if (mouse_mode == MOUSE_MODE_CAPTURED && use_raw_input) {
+						const LONG center_x = (crect.left + crect.right) / 2;
+						const LONG center_y = (crect.top + crect.bottom) / 2;
+						crect = { center_x, center_y, center_x + 1, center_y + 1 };
+					}
 					ClipCursor(&crect);
+					// </ELIM>
 				}
 
 				if (!window.minimized && window.was_fullscreen_pre_min) {
@@ -6180,6 +6264,12 @@ void DisplayServerWindows::_process_activate_event(WindowID p_window_id) {
 			ReleaseCapture();
 		}
 		wd.window_focused = false;
+		// <ELIM> Hand the cursor back: stop the raw mouse thread and release the centre-pixel clip
+		raw_mouse.set_capture(false);
+		if (mouse_mode == MOUSE_MODE_CAPTURED) {
+			ClipCursor(nullptr);
+		}
+		// </ELIM>
 #ifdef ACCESSKIT_ENABLED
 		if (accessibility_driver) {
 			accessibility_driver->accessibility_set_window_focused(p_window_id, false);
@@ -7176,6 +7266,11 @@ DisplayServerWindows::DisplayServerWindows(const String &p_rendering_driver, Win
 		return;
 	}
 
+	// <ELIM> Raw mouse input on its own thread
+	if (!raw_mouse.start()) {
+		WARN_PRINT("Raw mouse input thread unavailable; mouse input stays on the main thread.");
+	}
+	// </ELIM>
 	_register_raw_input_devices(INVALID_WINDOW_ID);
 
 	String appname;
@@ -7655,6 +7750,9 @@ void DisplayServerWindows::register_windows_driver() {
 }
 
 DisplayServerWindows::~DisplayServerWindows() {
+	// <ELIM> Raw mouse input on its own thread
+	raw_mouse.stop();
+	// </ELIM>
 	LocalVector<List<FileDialogData *>::Element *> to_remove;
 	for (List<FileDialogData *>::Element *E = file_dialogs.front(); E; E = E->next()) {
 		FileDialogData *fd = E->get();
