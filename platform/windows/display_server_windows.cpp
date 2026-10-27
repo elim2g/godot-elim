@@ -334,17 +334,20 @@ void DisplayServerWindows::_register_raw_input_devices(WindowID p_target_window)
 	}
 }
 
-// <ELIM> Raw mouse input on its own thread: one merged motion event per frame
-void DisplayServerWindows::_deliver_raw_mouse_motion(const Vector2i &p_motion) {
-	if (p_motion == Vector2i() || mouse_mode != MOUSE_MODE_CAPTURED) {
+// <ELIM> Raw mouse input on its own thread: timestamped samples to Input, one merged motion event per frame
+void DisplayServerWindows::_deliver_raw_mouse_motion() {
+	if (!raw_mouse.has_pending()) {
 		return;
 	}
 
 	const WindowID window_id = _get_focused_window_or_popup();
 	const RBMap<WindowID, WindowData>::Element *window = windows.find(window_id);
-	if (window == nullptr || !(window->value().window_focused || window->value().is_popup)) {
+	if (mouse_mode != MOUSE_MODE_CAPTURED || window == nullptr || !(window->value().window_focused || window->value().is_popup)) {
+		raw_mouse.discard();
 		return;
 	}
+
+	const Vector2i motion = raw_mouse.consume_into_input();
 
 	const BitField<WinKeyModifierMask> mods = _get_mods();
 	const BitField<MouseButtonMask> buttons = mouse_get_button_state();
@@ -361,8 +364,8 @@ void DisplayServerWindows::_deliver_raw_mouse_motion(const Vector2i &p_motion) {
 	mm->set_button_mask(buttons);
 	mm->set_position(window_center);
 	mm->set_global_position(window_center);
-	mm->set_relative(p_motion);
-	mm->set_relative_screen_position(p_motion);
+	mm->set_relative(motion);
+	mm->set_relative_screen_position(motion);
 
 	Input::get_singleton()->parse_input_event(mm);
 }
@@ -3928,13 +3931,16 @@ void DisplayServerWindows::process_events() {
 			pumped_messages++;
 		}
 	}
+	bool raw_mouse_flushed = true;
 	if (raw_mouse.is_running()) {
-		_deliver_raw_mouse_motion(raw_mouse.consume_motion());
+		raw_mouse_flushed = raw_mouse.flush();
+		_deliver_raw_mouse_motion();
 		raw_mouse_packets += raw_mouse.take_packet_count();
 	}
 	if (TntInsights::wants_counters()) {
 		GodotProfileCounter("Pumped Messages", pumped_messages);
 		GodotProfileCounter("Raw Mouse Packets", raw_mouse_packets);
+		GodotProfileCounter("Raw Mouse Flush Timeouts", raw_mouse_flushed ? 0 : 1);
 	}
 	raw_mouse_packets = 0;
 	// </ELIM>
@@ -7267,7 +7273,9 @@ DisplayServerWindows::DisplayServerWindows(const String &p_rendering_driver, Win
 	}
 
 	// <ELIM> Raw mouse input on its own thread
-	if (!raw_mouse.start()) {
+	if (raw_mouse.start()) {
+		Input::get_singleton()->set_mouse_motion_sampled_by_platform(true);
+	} else {
 		WARN_PRINT("Raw mouse input thread unavailable; mouse input stays on the main thread.");
 	}
 	// </ELIM>

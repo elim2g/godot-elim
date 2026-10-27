@@ -6,24 +6,18 @@
 
 #include "raw_mouse_input_windows.h"
 
+#include "core/input/input.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
-#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
-#endif
-
 bool RawMouseInputWindows::start() {
 	wake_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 	if (wake_event == nullptr) {
 		return false;
 	}
-
-	// Without the high-resolution timer every packet wakes the thread; correct, just costlier.
-	batch_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
 
 	thread.start(_thread_func, this);
 	started.wait();
@@ -42,10 +36,6 @@ void RawMouseInputWindows::stop() {
 		thread.wait_to_finish();
 	}
 
-	if (batch_timer != nullptr) {
-		CloseHandle(static_cast<HANDLE>(batch_timer));
-		batch_timer = nullptr;
-	}
 	if (wake_event != nullptr) {
 		CloseHandle(static_cast<HANDLE>(wake_event));
 		wake_event = nullptr;
@@ -62,19 +52,43 @@ void RawMouseInputWindows::set_capture(bool p_capture) {
 	SetEvent(static_cast<HANDLE>(wake_event));
 }
 
-Vector2i RawMouseInputWindows::consume_motion() {
+bool RawMouseInputWindows::flush() {
+	if (!spinning.is_set()) {
+		return true;
+	}
+
+	GodotProfileZone("raw mouse: flush");
+	const uint32_t request = flush_requested.increment();
+	const uint64_t deadline_usec = OS::get_singleton()->get_ticks_usec() + FLUSH_TIMEOUT_USEC;
+	while (flush_completed.get() != request) {
+		if (OS::get_singleton()->get_ticks_usec() > deadline_usec) {
+			return false;
+		}
+		YieldProcessor();
+	}
+
+	return true;
+}
+
+Vector2i RawMouseInputWindows::consume_into_input() {
 	const uint32_t read = read_index.get();
 	const uint32_t write = write_index.get();
 
+	Input *input = Input::get_singleton();
 	Vector2i motion;
 	for (uint32_t i = read; i != write; i++) {
 		const Sample &sample = ring[i & RING_MASK];
-		motion.x += sample.dx;
-		motion.y += sample.dy;
+		const Vector2i relative(sample.dx, sample.dy);
+		input->push_mouse_motion_sample(sample.usec, relative);
+		motion += relative;
 	}
 	read_index.set(write);
 
 	return motion;
+}
+
+void RawMouseInputWindows::discard() {
+	read_index.set(write_index.get());
 }
 
 uint32_t RawMouseInputWindows::take_packet_count() {
@@ -102,28 +116,22 @@ void RawMouseInputWindows::_run() {
 		return;
 	}
 
-	LARGE_INTEGER batch_due;
-	batch_due.QuadPart = -int64_t(BATCH_INTERVAL_USEC) * 10;
-
 	bool registered = false;
 	while (!exit_requested.is_set()) {
 		const bool capture = capture_requested.is_set();
 		if (capture != registered) {
 			_register_mouse(capture);
 			registered = capture;
+			if (!capture) {
+				// Publish what was queued before the release; the main thread discards it.
+				_drain();
+			}
 		}
 
-		const HANDLE wake = static_cast<HANDLE>(wake_event);
-		const DWORD woke = MsgWaitForMultipleObjectsEx(1, &wake, INFINITE, QS_RAWINPUT, MWMO_INPUTAVAILABLE);
-		if (woke != WAIT_OBJECT_0 + 1) {
-			continue;
-		}
-
-		_drain();
-
-		if (batch_timer != nullptr) {
-			SetWaitableTimer(static_cast<HANDLE>(batch_timer), &batch_due, 0, nullptr, nullptr, FALSE);
-			WaitForSingleObject(static_cast<HANDLE>(batch_timer), INFINITE);
+		if (capture) {
+			_spin();
+		} else {
+			WaitForSingleObject(static_cast<HANDLE>(wake_event), INFINITE);
 		}
 	}
 
@@ -145,6 +153,26 @@ void RawMouseInputWindows::_register_mouse(bool p_capture) {
 	if (!RegisterRawInputDevices(&rid, 1, sizeof(rid)) && p_capture) {
 		ERR_PRINT("Raw mouse input registration failed; captured mouse motion is unavailable.");
 	}
+}
+
+void RawMouseInputWindows::_spin() {
+	spinning.set();
+
+	uint64_t next_drain_usec = 0;
+	while (capture_requested.is_set() && !exit_requested.is_set()) {
+		const uint32_t request = flush_requested.get();
+		const uint64_t now_usec = OS::get_singleton()->get_ticks_usec();
+		if (request == flush_completed.get() && now_usec < next_drain_usec) {
+			YieldProcessor();
+			continue;
+		}
+
+		_drain();
+		flush_completed.set(request);
+		next_drain_usec = now_usec + DRAIN_INTERVAL_USEC;
+	}
+
+	spinning.clear();
 }
 
 // NEXTRAWINPUTBLOCK, without the QWORD that windows.h leaves undeclared.

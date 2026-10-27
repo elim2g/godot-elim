@@ -74,6 +74,9 @@ private:
 	int max_physics_steps_per_frame = 8;
 	int max_user_physics_steps_per_frame = 8;
 	double _physics_interpolation_fraction = 0.0f;
+	// <ELIM> Per-tick mouse look: wall-clock time up to which the current physics step consumes input
+	uint64_t _physics_step_input_cutoff_usec = 0;
+	// </ELIM>
 	bool abort_on_gpu_errors = false;
 	bool use_validation_layers = false;
 	bool generate_spirv_debug_info = false;
@@ -141,6 +144,9 @@ public:
 	uint64_t get_frame_ticks() const { return _frame_ticks; }
 	double get_process_step() const { return _process_step; }
 	double get_physics_interpolation_fraction() const { return _physics_interpolation_fraction; }
+	// <ELIM> Per-tick mouse look
+	uint64_t get_physics_step_input_cutoff_usec() const { return _physics_step_input_cutoff_usec; }
+	// </ELIM>
 
 	void set_time_scale(double p_scale);
 	double get_time_scale() const;

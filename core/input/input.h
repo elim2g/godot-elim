@@ -146,6 +146,20 @@ private:
 	bool agile_input_event_flushing = false;
 	bool use_accumulated_input = true;
 
+	// <ELIM> Per-tick mouse look: captured mouse motion, timestamped, consumed by physics ticks
+	struct MouseMotionSample {
+		uint64_t usec;
+		Vector2 relative;
+	};
+	static constexpr uint32_t MOUSE_MOTION_SAMPLE_CAPACITY = 1024;
+	static constexpr uint32_t MOUSE_MOTION_SAMPLE_MASK = MOUSE_MOTION_SAMPLE_CAPACITY - 1;
+	MouseMotionSample mouse_motion_samples[MOUSE_MOTION_SAMPLE_CAPACITY];
+	uint32_t mouse_motion_sample_read = 0;
+	uint32_t mouse_motion_sample_write = 0;
+	bool mouse_motion_sampled_by_platform = false;
+	void _push_mouse_motion_sample(uint64_t p_usec, const Vector2 &p_relative);
+	// </ELIM>
+
 	int mouse_from_touch_index = -1;
 
 	struct VibrationInfo {
@@ -408,6 +422,16 @@ public:
 	void set_agile_input_event_flushing(bool p_enable);
 	void set_use_accumulated_input(bool p_enable);
 	bool is_using_accumulated_input();
+
+	// <ELIM> Per-tick mouse look
+	// A platform that timestamps captured motion itself pushes samples; otherwise they are taken
+	// from parsed motion events, stamped on arrival.
+	void set_mouse_motion_sampled_by_platform(bool p_enable);
+	void push_mouse_motion_sample(uint64_t p_usec, const Vector2 &p_relative);
+	Vector2 consume_mouse_motion_until(uint64_t p_usec);
+	Vector2 get_pending_mouse_motion() const;
+	void discard_mouse_motion();
+	// </ELIM>
 
 	void release_pressed_events();
 

@@ -167,6 +167,12 @@ void Input::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("parse_input_event", "event"), &Input::parse_input_event);
 	ClassDB::bind_method(D_METHOD("set_use_accumulated_input", "enable"), &Input::set_use_accumulated_input);
 	ClassDB::bind_method(D_METHOD("is_using_accumulated_input"), &Input::is_using_accumulated_input);
+	// <ELIM> Per-tick mouse look
+	ClassDB::bind_method(D_METHOD("push_mouse_motion_sample", "usec", "relative"), &Input::push_mouse_motion_sample);
+	ClassDB::bind_method(D_METHOD("consume_mouse_motion_until", "usec"), &Input::consume_mouse_motion_until);
+	ClassDB::bind_method(D_METHOD("get_pending_mouse_motion"), &Input::get_pending_mouse_motion);
+	ClassDB::bind_method(D_METHOD("discard_mouse_motion"), &Input::discard_mouse_motion);
+	// </ELIM>
 	ClassDB::bind_method(D_METHOD("flush_buffered_events"), &Input::flush_buffered_events);
 	ClassDB::bind_method(D_METHOD("set_emulate_mouse_from_touch", "enable"), &Input::set_emulate_mouse_from_touch);
 	ClassDB::bind_method(D_METHOD("is_emulating_mouse_from_touch"), &Input::is_emulating_mouse_from_touch);
@@ -1259,6 +1265,15 @@ void Input::parse_input_event(RequiredParam<InputEvent> rp_event) {
 	}
 #endif
 
+	// <ELIM> Per-tick mouse look: sample before accumulation merges the motion
+	if (!mouse_motion_sampled_by_platform) {
+		const InputEventMouseMotion *motion = Object::cast_to<InputEventMouseMotion>(*p_event);
+		if (motion != nullptr && get_mouse_mode() == MOUSE_MODE_CAPTURED) {
+			_push_mouse_motion_sample(OS::get_singleton()->get_ticks_usec(), motion->get_relative_screen_position());
+		}
+	}
+	// </ELIM>
+
 	if (use_accumulated_input) {
 		if (buffered_events.is_empty() || !buffered_events.back()->get()->accumulate(p_event)) {
 			buffered_events.push_back(p_event);
@@ -1269,6 +1284,66 @@ void Input::parse_input_event(RequiredParam<InputEvent> rp_event) {
 		_parse_input_event_impl(p_event, false);
 	}
 }
+
+// <ELIM> Per-tick mouse look
+void Input::_push_mouse_motion_sample(uint64_t p_usec, const Vector2 &p_relative) {
+	// Full only when nothing has consumed for a long time: fold into the newest sample, never drop.
+	if (mouse_motion_sample_write - mouse_motion_sample_read == MOUSE_MOTION_SAMPLE_CAPACITY) {
+		MouseMotionSample &newest = mouse_motion_samples[(mouse_motion_sample_write - 1) & MOUSE_MOTION_SAMPLE_MASK];
+		newest.usec = p_usec;
+		newest.relative += p_relative;
+		return;
+	}
+
+	mouse_motion_samples[mouse_motion_sample_write & MOUSE_MOTION_SAMPLE_MASK] = { p_usec, p_relative };
+	mouse_motion_sample_write++;
+}
+
+void Input::set_mouse_motion_sampled_by_platform(bool p_enable) {
+	_THREAD_SAFE_METHOD_
+
+	mouse_motion_sampled_by_platform = p_enable;
+}
+
+void Input::push_mouse_motion_sample(uint64_t p_usec, const Vector2 &p_relative) {
+	_THREAD_SAFE_METHOD_
+
+	_push_mouse_motion_sample(p_usec, p_relative);
+}
+
+Vector2 Input::consume_mouse_motion_until(uint64_t p_usec) {
+	_THREAD_SAFE_METHOD_
+
+	Vector2 motion;
+	while (mouse_motion_sample_read != mouse_motion_sample_write) {
+		const MouseMotionSample &sample = mouse_motion_samples[mouse_motion_sample_read & MOUSE_MOTION_SAMPLE_MASK];
+		if (sample.usec > p_usec) {
+			break;
+		}
+		motion += sample.relative;
+		mouse_motion_sample_read++;
+	}
+
+	return motion;
+}
+
+Vector2 Input::get_pending_mouse_motion() const {
+	_THREAD_SAFE_METHOD_
+
+	Vector2 motion;
+	for (uint32_t i = mouse_motion_sample_read; i != mouse_motion_sample_write; i++) {
+		motion += mouse_motion_samples[i & MOUSE_MOTION_SAMPLE_MASK].relative;
+	}
+
+	return motion;
+}
+
+void Input::discard_mouse_motion() {
+	_THREAD_SAFE_METHOD_
+
+	mouse_motion_sample_read = mouse_motion_sample_write;
+}
+// </ELIM>
 
 #ifdef DEBUG_ENABLED
 void Input::flush_frame_parsed_events() {

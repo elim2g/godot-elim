@@ -4843,9 +4843,21 @@ bool Main::iteration() {
 #endif // XR_DISABLED
 
 	GodotProfileZoneGrouped(_profile_zone, "physics");
+	// <ELIM> Per-tick mouse look: each step of a multi-step frame consumes input up to the end of
+	// its own slice of wall time; the last step consumes everything that has arrived.
+	const double physics_step_usec = physics_step * 1000000.0;
+	// </ELIM>
 	for (int iters = 0; iters < advance.physics_steps; ++iters) {
 		GodotProfileZone("Physics Step");
 		GodotProfileZoneGroupedFirst(_physics_zone, "setup");
+		// <ELIM> Per-tick mouse look
+		const int steps_after = advance.physics_steps - 1 - iters;
+		uint64_t input_lag_usec = 0;
+		if (steps_after > 0) {
+			input_lag_usec = MIN(uint64_t((advance.interpolation_fraction + steps_after) * physics_step_usec), ticks);
+		}
+		Engine::get_singleton()->_physics_step_input_cutoff_usec = ticks - input_lag_usec;
+		// </ELIM>
 		if (Input::get_singleton()->is_agile_input_event_flushing()) {
 			Input::get_singleton()->flush_buffered_events();
 		}

@@ -509,7 +509,7 @@ class DisplayServerWindows : public DisplayServer {
 	WindowID _get_focused_window_or_popup() const;
 	void _register_raw_input_devices(WindowID p_target_window);
 	// <ELIM> Raw mouse input on its own thread
-	void _deliver_raw_mouse_motion(const Vector2i &p_motion);
+	void _deliver_raw_mouse_motion();
 	// </ELIM>
 	bool _has_moving_window() const;
 

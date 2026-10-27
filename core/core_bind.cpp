@@ -1908,6 +1908,12 @@ double Engine::get_physics_interpolation_fraction() const {
 	return ::Engine::get_singleton()->get_physics_interpolation_fraction();
 }
 
+// <ELIM> Per-tick mouse look
+uint64_t Engine::get_physics_step_input_cutoff_usec() const {
+	return ::Engine::get_singleton()->get_physics_step_input_cutoff_usec();
+}
+// </ELIM>
+
 void Engine::set_max_fps(int p_fps) {
 	::Engine::get_singleton()->set_max_fps(p_fps);
 }
@@ -2090,6 +2096,9 @@ void Engine::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_physics_jitter_fix", "physics_jitter_fix"), &Engine::set_physics_jitter_fix);
 	ClassDB::bind_method(D_METHOD("get_physics_jitter_fix"), &Engine::get_physics_jitter_fix);
 	ClassDB::bind_method(D_METHOD("get_physics_interpolation_fraction"), &Engine::get_physics_interpolation_fraction);
+	// <ELIM> Per-tick mouse look
+	ClassDB::bind_method(D_METHOD("get_physics_step_input_cutoff_usec"), &Engine::get_physics_step_input_cutoff_usec);
+	// </ELIM>
 	ClassDB::bind_method(D_METHOD("set_max_fps", "max_fps"), &Engine::set_max_fps);
 	ClassDB::bind_method(D_METHOD("get_max_fps"), &Engine::get_max_fps);
 
