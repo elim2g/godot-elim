@@ -263,6 +263,9 @@ bool DisplayServerX11::_refresh_device_info() {
 	}
 
 	xi.absolute_devices.clear();
+	// <ELIM> Previous position of each absolute device
+	xi.absolute_last_pos.clear();
+	// </ELIM>
 	xi.touch_devices.clear();
 	xi.pen_inverted_devices.clear();
 	xi.last_relative_time = 0;
@@ -367,6 +370,9 @@ void DisplayServerX11::_flush_mouse_motion() {
 			XIDeviceEvent *event_data = (XIDeviceEvent *)event.xcookie.data;
 			if (event_data->evtype == XI_RawMotion) {
 				XFreeEventData(x11_display, &event.xcookie);
+				// <ELIM> Keep the arrival times in step
+				polled_event_usec.remove_at(event_index);
+				// </ELIM>
 				polled_events.remove_at(event_index--);
 				continue;
 			}
@@ -556,10 +562,16 @@ void DisplayServerX11::_mouse_update_mode() {
 		}
 		WindowData &window = windows[window_id];
 
+		// <ELIM> owner_events duplicates every XI_RawMotion event; captured mode reports to the grab window only
+		// if (XGrabPointer(
+		// 			x11_display, window.x11_window, True,
+		// 			ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+		// 			GrabModeAsync, GrabModeAsync, window.x11_window, None, CurrentTime) != GrabSuccess) {
 		if (XGrabPointer(
-					x11_display, window.x11_window, True,
+					x11_display, window.x11_window, mouse_mode != MOUSE_MODE_CAPTURED,
 					ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
 					GrabModeAsync, GrabModeAsync, window.x11_window, None, CurrentTime) != GrabSuccess) {
+			// </ELIM>
 			ERR_PRINT("NO GRAB");
 		}
 
@@ -4569,6 +4581,9 @@ void DisplayServerX11::_check_pending_events(LocalVector<XEvent> &r_events) {
 
 	// Non-blocking wait for next event and remove it from the queue.
 	XEvent ev = {};
+	// <ELIM> Stamp arrivals for timestamped mouse motion samples
+	const uint64_t arrival_usec = OS::get_singleton()->get_ticks_usec();
+	// </ELIM>
 	while (XCheckIfEvent(x11_display, &ev, _predicate_all_events, nullptr)) {
 		// Check if the input manager wants to process the event.
 		if (XFilterEvent(&ev, None)) {
@@ -4586,6 +4601,9 @@ void DisplayServerX11::_check_pending_events(LocalVector<XEvent> &r_events) {
 		}
 
 		r_events.push_back(ev);
+		// <ELIM> Stamp arrivals for timestamped mouse motion samples
+		polled_event_usec.push_back(arrival_usec);
+		// </ELIM>
 	}
 }
 
@@ -4791,11 +4809,18 @@ void DisplayServerX11::process_events() {
 	xi.pressure_supported = false;
 
 	LocalVector<XEvent> events;
+	// <ELIM> Arrival times for timestamped mouse motion samples
+	LocalVector<uint64_t> event_usec;
+	// </ELIM>
 	{
 		// Block events polling while flushing events.
 		MutexLock mutex_lock(events_mutex);
 		events = polled_events;
 		polled_events.clear();
+		// <ELIM> Arrival times for timestamped mouse motion samples
+		event_usec = polled_event_usec;
+		polled_event_usec.clear();
+		// </ELIM>
 	}
 
 	for (uint32_t event_index = 0; event_index < events.size(); ++event_index) {
@@ -4901,11 +4926,14 @@ void DisplayServerX11::process_events() {
 							xi.pen_inverted = pen_inverted->value;
 						}
 
-						// https://bugs.freedesktop.org/show_bug.cgi?id=71609
-						// http://lists.libsdl.org/pipermail/commits-libsdl.org/2015-June/000282.html
-						if (raw_event->time == xi.last_relative_time && rel_x == xi.relative_motion.x && rel_y == xi.relative_motion.y) {
-							break; // Flush duplicate to avoid overly fast motion
-						}
+						// <ELIM> No duplicate filter: the captured grab no longer uses owner_events, which is what
+						// duplicated raw motion, and the filter dropped real packets from high polling rate mice.
+						// // https://bugs.freedesktop.org/show_bug.cgi?id=71609
+						// // http://lists.libsdl.org/pipermail/commits-libsdl.org/2015-June/000282.html
+						// if (raw_event->time == xi.last_relative_time && rel_x == xi.relative_motion.x && rel_y == xi.relative_motion.y) {
+						// 	break; // Flush duplicate to avoid overly fast motion
+						// }
+						// </ELIM>
 
 						xi.old_raw_pos.x = xi.raw_pos.x;
 						xi.old_raw_pos.y = xi.raw_pos.y;
@@ -4914,17 +4942,32 @@ void DisplayServerX11::process_events() {
 
 						HashMap<int, Vector2>::Iterator abs_info = xi.absolute_devices.find(device_id);
 
+						// <ELIM> Accumulate relative motion (several raw events can precede one MotionNotify) and sample it
+						Vector2 raw_motion;
 						if (abs_info) {
 							// Absolute mode device
 							Vector2 mult = abs_info->value;
 
-							xi.relative_motion.x += (xi.raw_pos.x - xi.old_raw_pos.x) * mult.x;
-							xi.relative_motion.y += (xi.raw_pos.y - xi.old_raw_pos.y) * mult.y;
+							// xi.relative_motion.x += (xi.raw_pos.x - xi.old_raw_pos.x) * mult.x;
+							// xi.relative_motion.y += (xi.raw_pos.y - xi.old_raw_pos.y) * mult.y;
+							HashMap<int, Vector2>::Iterator last_pos = xi.absolute_last_pos.find(device_id);
+							if (last_pos) {
+								raw_motion = (xi.raw_pos - last_pos->value) * mult;
+								last_pos->value = xi.raw_pos;
+							} else {
+								xi.absolute_last_pos.insert(device_id, xi.raw_pos);
+							}
 						} else {
 							// Relative mode device
-							xi.relative_motion.x = xi.raw_pos.x;
-							xi.relative_motion.y = xi.raw_pos.y;
+							// xi.relative_motion.x = xi.raw_pos.x;
+							// xi.relative_motion.y = xi.raw_pos.y;
+							raw_motion = xi.raw_pos;
 						}
+						xi.relative_motion += raw_motion;
+						if (mouse_mode == MOUSE_MODE_CAPTURED && app_focused) {
+							Input::get_singleton()->push_mouse_motion_sample(event_usec[event_index], raw_motion);
+						}
+						// </ELIM>
 
 						xi.last_relative_time = raw_event->time;
 					} break;
@@ -5101,10 +5144,16 @@ void DisplayServerX11::process_events() {
 							XDefineCursor(x11_display, E.value.x11_window, null_cursor);
 						}
 
+						// <ELIM> owner_events duplicates every XI_RawMotion event; captured mode reports to the grab window only
+						// XGrabPointer(
+						// 		x11_display, E.value.x11_window, True,
+						// 		ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+						// 		GrabModeAsync, GrabModeAsync, E.value.x11_window, None, CurrentTime);
 						XGrabPointer(
-								x11_display, E.value.x11_window, True,
+								x11_display, E.value.x11_window, mouse_mode != MOUSE_MODE_CAPTURED,
 								ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
 								GrabModeAsync, GrabModeAsync, E.value.x11_window, None, CurrentTime);
+						// </ELIM>
 					}
 				}
 #ifdef TOUCH_ENABLED
@@ -5370,7 +5419,10 @@ void DisplayServerX11::process_events() {
 				//  RawMotion provides more precision than MotionNotify, which doesn't sense subpixel motion.
 				//  Therefore, MotionNotify cannot be the authority on relative mouse motion.
 				//  This means we need to take a combined approach...
-				Point2i rel;
+				// <ELIM> Keep sub-unit raw motion: libinput reports deltas normalized to 1000 DPI
+				// Point2i rel;
+				Vector2 rel;
+				// </ELIM>
 
 				// Only use raw input if in capture mode. Otherwise use the classic behavior.
 				if (mouse_mode == MOUSE_MODE_CAPTURED) {
@@ -6979,6 +7031,9 @@ DisplayServerX11::DisplayServerX11(const String &p_rendering_driver, WindowMode 
 		r_error = ERR_UNAVAILABLE;
 		return;
 	}
+	// <ELIM> Captured mouse motion samples come from XI_RawMotion with their arrival time
+	Input::get_singleton()->set_mouse_motion_sampled_by_platform(true);
+	// </ELIM>
 
 	if (!XRegisterIMInstantiateCallback(x11_display, nullptr, nullptr, nullptr, (::XIDProc)(_xim_instantiate_callback), (::XPointer)this)) {
 		WARN_PRINT("Error registering XIM instantiate callback.");

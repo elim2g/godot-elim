@@ -288,6 +288,9 @@ class DisplayServerX11 : public DisplayServer {
 		Vector2 relative_motion;
 		Vector2 raw_pos;
 		Vector2 old_raw_pos;
+		// <ELIM> Previous position of each absolute device; one shared position mixed devices up
+		HashMap<int, Vector2> absolute_last_pos;
+		// </ELIM>
 		::Time last_relative_time;
 	} xi;
 
@@ -378,6 +381,9 @@ class DisplayServerX11 : public DisplayServer {
 	Thread events_thread;
 	SafeFlag events_thread_done;
 	LocalVector<XEvent> polled_events;
+	// <ELIM> Arrival time of each polled event, kept in step with polled_events
+	LocalVector<uint64_t> polled_event_usec;
+	// </ELIM>
 	static void _poll_events_thread(void *ud);
 	bool _wait_for_events(int timeout_seconds = 1, int timeout_microseconds = 0) const;
 	void _poll_events();

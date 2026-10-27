@@ -545,7 +545,15 @@
 	mm->set_global_position(wd.mouse_pos);
 	mm->set_velocity(Input::get_singleton()->get_last_mouse_velocity());
 	mm->set_screen_velocity(mm->get_velocity());
-	const Vector2i relativeMotion = Vector2i(delta.x, delta.y) * ds->screen_get_max_scale();
+	// <ELIM> Keep sub-point motion, and sample captured motion at the event's own time
+	// const Vector2i relativeMotion = Vector2i(delta.x, delta.y) * ds->screen_get_max_scale();
+	const Vector2 relativeMotion = Vector2(delta.x, delta.y) * ds->screen_get_max_scale();
+	if (ds->mouse_get_mode() == DisplayServer::MOUSE_MODE_CAPTURED) {
+		const uint64_t now_usec = OS::get_singleton()->get_ticks_usec();
+		const double age_sec = MAX([[NSProcessInfo processInfo] systemUptime] - [event timestamp], 0.0);
+		Input::get_singleton()->push_mouse_motion_sample(now_usec - MIN(uint64_t(age_sec * 1000000.0), now_usec), relativeMotion);
+	}
+	// </ELIM>
 	mm->set_relative(relativeMotion);
 	mm->set_relative_screen_position(relativeMotion);
 	ds->get_key_modifier_state([event modifierFlags], mm);

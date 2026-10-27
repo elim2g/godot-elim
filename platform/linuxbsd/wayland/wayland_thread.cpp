@@ -31,6 +31,11 @@
 #include "wayland_thread.h"
 
 #include "core/config/engine.h"
+// <ELIM> Timestamped mouse motion samples
+#include "core/input/input.h"
+
+#include <time.h>
+// </ELIM>
 
 #ifdef WAYLAND_ENABLED
 
@@ -1997,6 +2002,9 @@ void WaylandThread::_wl_pointer_on_frame(void *data, struct wl_pointer *wl_point
 	if (ws == nullptr) {
 		// We're probably on a decoration or some other third-party thing. Let's
 		// "commit" the data and call it a day.
+		// <ELIM> Relative motion accumulates until a frame consumes it
+		pd.relative_motion = Vector2();
+		// </ELIM>
 		old_pd = pd;
 		return;
 	}
@@ -2189,6 +2197,9 @@ void WaylandThread::_wl_pointer_on_frame(void *data, struct wl_pointer *wl_point
 	// Reset the scroll vectors as we already handled them.
 	pd.scroll_vector = Vector2();
 	pd.discrete_scroll_vector_120 = Vector2i();
+	// <ELIM> Relative motion accumulates until a frame consumes it
+	pd.relative_motion = Vector2();
+	// </ELIM>
 
 	// Update the data all getters read. Wayland's specification requires us to do
 	// this, since all pointer actions are sent in individual events.
@@ -2594,8 +2605,25 @@ void WaylandThread::_wp_relative_pointer_on_relative_motion(void *data, struct z
 
 	PointerData &pd = ss->pointer_data_buffer;
 
-	pd.relative_motion.x = wl_fixed_to_double(dx);
-	pd.relative_motion.y = wl_fixed_to_double(dy);
+	// <ELIM> Accumulate (several events can precede one frame); while locked use unaccelerated motion and sample it
+	// pd.relative_motion.x = wl_fixed_to_double(dx);
+	// pd.relative_motion.y = wl_fixed_to_double(dy);
+	if (ss->wp_locked_pointer) {
+		const Vector2 raw_motion(wl_fixed_to_double(dx_unaccel), wl_fixed_to_double(dy_unaccel));
+		pd.relative_motion += raw_motion;
+
+		// Event times are CLOCK_MONOTONIC; the engine's ticks may not be, so only the event's age carries over.
+		struct timespec now = {};
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		const uint64_t now_usec = uint64_t(now.tv_sec) * 1000000 + uint64_t(now.tv_nsec) / 1000;
+		const uint64_t event_usec = (uint64_t(uptime_hi) << 32) | uptime_lo;
+		const uint64_t age_usec = now_usec > event_usec ? now_usec - event_usec : 0;
+		const uint64_t ticks_usec = OS::get_singleton()->get_ticks_usec();
+		Input::get_singleton()->push_mouse_motion_sample(ticks_usec - MIN(age_usec, ticks_usec), raw_motion);
+	} else {
+		pd.relative_motion += Vector2(wl_fixed_to_double(dx), wl_fixed_to_double(dy));
+	}
+	// </ELIM>
 
 	pd.relative_motion_time = uptime_lo;
 }
@@ -4886,6 +4914,10 @@ Error WaylandThread::init() {
 		WARN_PRINT("Can't obtain the idle inhibition manager. The screen might turn off even after calling screen_set_keep_on()!");
 	}
 #endif // DBUS_ENABLED
+
+	// <ELIM> Captured mouse motion samples come from relative pointer events with their own time
+	Input::get_singleton()->set_mouse_motion_sampled_by_platform(registry.wp_relative_pointer_manager != nullptr);
+	// </ELIM>
 
 	if (!registry.wp_fifo_manager_name) {
 		WARN_PRINT("FIFO protocol not found! Frame pacing will be degraded.");
