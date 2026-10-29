@@ -745,6 +745,8 @@ public:
 	virtual void lightmap_set_shadowmask_mode(RID p_lightmap, RS::ShadowmaskMode p_mode) override;
 	// <ELIM>
 	virtual void lightmap_set_emitter_arcs(RID p_lightmap, bool p_has_arcs, bool p_enabled) override;
+	// The compatibility renderer keeps the brightness-based sky-reflection occlusion.
+	virtual void lightmap_set_sky_visibility_texture(RID p_lightmap, RID p_texture) override {}
 	// </ELIM>
 
 	/* LIGHTMAP INSTANCE */

@@ -181,6 +181,7 @@ public:
 	virtual void lightmap_set_shadowmask_mode(RID p_lightmap, RS::ShadowmaskMode p_mode) = 0;
 	// <ELIM>
 	virtual void lightmap_set_emitter_arcs(RID p_lightmap, bool p_has_arcs, bool p_enabled) = 0;
+	virtual void lightmap_set_sky_visibility_texture(RID p_lightmap, RID p_texture) = 0;
 	// </ELIM>
 
 	/* LIGHTMAP INSTANCE */

@@ -343,6 +343,8 @@ private:
 		// <ELIM> See RenderingServer::lightmap_set_emitter_arcs.
 		bool emitter_arcs = false;
 		bool emitter_specular = true;
+		// See RenderingServer::lightmap_set_sky_visibility_texture.
+		RID sky_visibility_texture;
 		// </ELIM>
 		bool uses_spherical_harmonics = false;
 		bool interior = false;
@@ -1024,10 +1026,13 @@ public:
 	enum {
 		LIGHTMAP_FLAG_EMITTER_ARCS = 1 << 8,
 		LIGHTMAP_FLAG_EMITTER_SPECULAR = 1 << 9,
+		// The sky visibility texture is bound (Forward+).
+		LIGHTMAP_FLAG_SKY_VISIBILITY = 1 << 10,
 	};
 	virtual void lightmap_set_emitter_arcs(RID p_lightmap, bool p_has_arcs, bool p_enabled) override;
 	bool lightmap_has_emitter_arcs(RID p_lightmap) const;
 	uint32_t lightmap_get_emitter_arc_flags(RID p_lightmap) const;
+	virtual void lightmap_set_sky_visibility_texture(RID p_lightmap, RID p_texture) override;
 	// </ELIM>
 
 	virtual float lightmap_get_probe_capture_update_speed() const override {
@@ -1077,6 +1082,14 @@ public:
 		ERR_FAIL_NULL_V(lm, RID());
 		return lm->shadow_texture;
 	}
+
+	// <ELIM>
+	_FORCE_INLINE_ RID sky_visibility_get_texture(RID p_lightmap) const {
+		const Lightmap *lm = lightmap_owner.get_or_null(p_lightmap);
+		ERR_FAIL_NULL_V(lm, RID());
+		return lm->sky_visibility_texture;
+	}
+	// </ELIM>
 
 	/* LIGHTMAP INSTANCE */
 

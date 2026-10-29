@@ -514,6 +514,7 @@ public:
 	FUNC2(lightmap_set_shadowmask_mode, RID, ShadowmaskMode)
 	// <ELIM>
 	FUNC3(lightmap_set_emitter_arcs, RID, bool, bool)
+	FUNC2(lightmap_set_sky_visibility_texture, RID, RID)
 	// </ELIM>
 
 	/* Shadow Atlas */

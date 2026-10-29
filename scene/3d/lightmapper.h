@@ -210,6 +210,10 @@ public:
 	// <ELIM> True when the shadowmask textures carry emitter arcs: two RGBA layers per
 	// atlas slice, (A.xy, half-width, sun visibility) then (B.xy, 0, log intensity).
 	virtual bool get_emitter_arcs() const { return false; }
+	// Sky visibility: one R8 image per atlas slice, the cosine-weighted fraction of
+	// each texel's hemisphere that sees the sky. None when it was not baked.
+	virtual int get_sky_visibility_texture_count() const { return 0; }
+	virtual Ref<Image> get_sky_visibility_texture(int p_index) const { return Ref<Image>(); }
 	// </ELIM>
 	virtual int get_bake_mesh_count() const = 0;
 	virtual Variant get_bake_mesh_userdata(int p_index) const = 0;

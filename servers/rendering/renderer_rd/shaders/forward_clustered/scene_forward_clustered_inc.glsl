@@ -220,6 +220,8 @@ directional_lights;
 #define LIGHTMAP_SHADOWMASK_MODE_MASK 0xFFu
 #define LIGHTMAP_FLAG_EMITTER_ARCS (1u << 8)
 #define LIGHTMAP_FLAG_EMITTER_SPECULAR (1u << 9)
+// The sky visibility array (lightmap_textures[MAX_LIGHTMAP_TEXTURES * 2 + ofs]) is bound.
+#define LIGHTMAP_FLAG_SKY_VISIBILITY (1u << 10)
 // </ELIM>
 
 struct Lightmap {
@@ -377,7 +379,10 @@ layout(set = 1, binding = 5) uniform texture2D shadow_atlas;
 
 layout(set = 1, binding = 6) uniform texture2D directional_shadow_atlas;
 
-layout(set = 1, binding = 7) uniform texture2DArray lightmap_textures[MAX_LIGHTMAP_TEXTURES * 2];
+// <ELIM> Lightmaps, shadowmasks, then sky visibility.
+// layout(set = 1, binding = 7) uniform texture2DArray lightmap_textures[MAX_LIGHTMAP_TEXTURES * 2];
+layout(set = 1, binding = 7) uniform texture2DArray lightmap_textures[MAX_LIGHTMAP_TEXTURES * 3];
+// </ELIM>
 
 layout(set = 1, binding = 8) uniform texture3D voxel_gi_textures[MAX_VOXEL_GI_INSTANCES];
 

@@ -77,6 +77,15 @@ layout(rgba8, set = 1, binding = 5) uniform restrict image2DArray shadowmask;
 layout(set = 1, binding = 5) uniform texture2D environment;
 #endif
 
+// <ELIM> Sky visibility: the cosine-weighted fraction of a texel's hemisphere that
+// sees the sky (a Q3 sky face, or nothing at all). While ray batches accumulate,
+// .g + .b hold the running sum as 16-bit fixed point (high byte, low byte, in
+// units of 1/255); the last batch writes the fraction to .rgb for denoise/dilate.
+#if defined(MODE_BOUNCE_LIGHT) && defined(USE_SKY_VISIBILITY)
+layout(rgba8, set = 1, binding = 6) uniform restrict image2DArray sky_visibility;
+#endif
+// </ELIM>
+
 // <ELIM> Emitter arcs, read-modify-written across light batches like the shadowmask:
 // arc_a = (A.xy hemi-octahedral, half-width, 1 + log runner-up intensity;
 //          0 = texel not processed),
@@ -1225,7 +1234,11 @@ vec3 trace_environment_color(vec3 ray_dir) {
 	return textureLod(sampler2D(environment, linear_sampler), st / vec2(PI * 2.0, PI), 0.0).rgb;
 }
 
-vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, float p_texel_size) {
+// <ELIM> r_sky_seen: the first segment reached the sky (a sky face, or a miss).
+// vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, float p_texel_size) {
+vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, float p_texel_size, out bool r_sky_seen) {
+	r_sky_seen = false;
+	// </ELIM>
 	// The lower limit considers the case where the lightmapper might have bounces disabled but light probes are requested.
 	vec3 position = p_position;
 	vec3 ray_dir = p_ray_dir;
@@ -1247,6 +1260,7 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 			// Sealed maps thus get sky ambient through sky apertures without CLEAR.
 			if ((surface_flags & SURFACE_FLAG_SKY) != 0u) {
 				light += throughput * trace_environment_color(ray_dir);
+				r_sky_seen = (depth == 0u);
 				break;
 			}
 			// </ELIM>
@@ -1359,6 +1373,9 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 		} else if (trace_result == RAY_MISS) {
 			// Look for the environment color and stop bouncing.
 			light += throughput * trace_environment_color(ray_dir);
+			// <ELIM>
+			r_sky_seen = (depth == 0u);
+			// </ELIM>
 			break;
 		} else if (trace_result == RAY_BACK) {
 			// <ELIM> Opaque bake: a backface hit means the ray entered solid
@@ -1678,9 +1695,17 @@ void main() {
 	vec3 neighbor_position = texelFetch(sampler2DArray(source_position, linear_sampler), ivec3(atlas_pos + ivec2(neighbor_offset, 0), params.atlas_slice), 0).xyz;
 	float texel_size_world_space = distance(position, neighbor_position);
 	uint noise = random_seed(ivec3(params.ray_from, atlas_pos));
+	// <ELIM> Rays are cosine-distributed, so the hit fraction is cosine-weighted.
+	uint sky_hits = 0u;
+	// </ELIM>
 	for (uint i = params.ray_from; i < params.ray_to; i++) {
 		vec3 ray_dir = generate_ray_dir_from_normal(normal, noise);
-		vec3 light = trace_indirect_light(position, ray_dir, noise, texel_size_world_space);
+		// <ELIM>
+		// vec3 light = trace_indirect_light(position, ray_dir, noise, texel_size_world_space);
+		bool sky_seen;
+		vec3 light = trace_indirect_light(position, ray_dir, noise, texel_size_world_space, sky_seen);
+		sky_hits += sky_seen ? 1u : 0u;
+		// </ELIM>
 
 #ifdef USE_SH_LIGHTMAPS
 		// These coefficients include the factored out SH evaluation, diffuse convolution, and final application, as well as the BRDF 1/PI and the spherical monte carlo factor.
@@ -1715,6 +1740,28 @@ void main() {
 	accum.rgb += light_accum / float(params.ray_count);
 	imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), accum);
 #endif
+
+	// <ELIM> An 8-bit running fraction would lose up to half a step per batch, which
+	// over dozens of batches is a visible bias; 16-bit fixed point is exact enough.
+#ifdef USE_SKY_VISIBILITY
+	{
+		const ivec3 sky_pos = ivec3(atlas_pos, params.atlas_slice);
+		float sky_sum = 0.0;
+		if (params.ray_from > 0u) {
+			const vec4 prev = imageLoad(sky_visibility, sky_pos);
+			sky_sum = round(prev.g * 255.0) + prev.b;
+		}
+		sky_sum += float(sky_hits) * 255.0 / float(params.ray_count);
+		if (params.ray_to >= params.ray_count) {
+			const float sky = clamp(sky_sum / 255.0, 0.0, 1.0);
+			imageStore(sky_visibility, sky_pos, vec4(sky, sky, sky, 1.0));
+		} else {
+			const float sky_high = min(floor(sky_sum), 255.0);
+			imageStore(sky_visibility, sky_pos, vec4(0.0, sky_high / 255.0, sky_sum - sky_high, 1.0));
+		}
+	}
+#endif
+	// </ELIM>
 
 #endif
 
@@ -1800,7 +1847,11 @@ void main() {
 	uint noise = random_seed(ivec3(params.ray_from, probe_index, 49502741 /* some prime */));
 	for (uint i = params.ray_from; i < params.ray_to; i++) {
 		vec3 ray_dir = generate_sphere_uniform_direction(noise);
-		vec3 light = trace_indirect_light(position, ray_dir, noise, 0.0);
+		// <ELIM>
+		// vec3 light = trace_indirect_light(position, ray_dir, noise, 0.0);
+		bool sky_seen;
+		vec3 light = trace_indirect_light(position, ray_dir, noise, 0.0, sky_seen);
+		// </ELIM>
 
 		float c[9] = float[](
 				0.282095, //l0

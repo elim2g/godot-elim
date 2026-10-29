@@ -2133,6 +2133,13 @@ uint32_t LightStorage::lightmap_get_emitter_arc_flags(RID p_lightmap) const {
 	}
 	return LIGHTMAP_FLAG_EMITTER_ARCS | (lm->emitter_specular ? LIGHTMAP_FLAG_EMITTER_SPECULAR : 0);
 }
+
+void LightStorage::lightmap_set_sky_visibility_texture(RID p_lightmap, RID p_texture) {
+	Lightmap *lm = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL(lm);
+
+	lm->sky_visibility_texture = p_texture;
+}
 // </ELIM>
 
 /* LIGHTMAP INSTANCE */

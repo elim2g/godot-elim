@@ -1227,6 +1227,9 @@ void RenderForwardClustered::_setup_lightmaps(const RenderDataRD *p_render_data,
 		// <ELIM> Low byte: shadowmask mode; above it the emitter-arc bits.
 		// scene_state.lightmaps[i].flags = light_storage->lightmap_get_shadowmask_mode(lightmap);
 		scene_state.lightmaps[i].flags = light_storage->lightmap_get_shadowmask_mode(lightmap) | light_storage->lightmap_get_emitter_arc_flags(lightmap);
+		if (RendererRD::TextureStorage::get_singleton()->texture_get_rd_texture(light_storage->sky_visibility_get_texture(lightmap)).is_valid()) {
+			scene_state.lightmaps[i].flags |= RendererRD::LightStorage::LIGHTMAP_FLAG_SKY_VISIBILITY;
+		}
 		// </ELIM>
 		if (p_render_data->camera_attributes.is_valid()) {
 			float baked_exposure = light_storage->lightmap_get_baked_exposure_normalization(lightmap);
@@ -3401,12 +3404,16 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(u);
 	}
 	{
+		// <ELIM> Three textures per lightmap: lightmap, shadowmask, sky visibility.
+		// textures.resize(scene_state.max_lightmaps * 2);
+		// for (uint32_t i = 0; i < scene_state.max_lightmaps * 2; i++) {
+		// 	uint32_t current_lightmap_index = i < scene_state.max_lightmaps ? i : i - scene_state.max_lightmaps;
 		Vector<RID> textures;
-		textures.resize(scene_state.max_lightmaps * 2);
+		textures.resize(scene_state.max_lightmaps * 3);
 
 		RID default_tex = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
-		for (uint32_t i = 0; i < scene_state.max_lightmaps * 2; i++) {
-			uint32_t current_lightmap_index = i < scene_state.max_lightmaps ? i : i - scene_state.max_lightmaps;
+		for (uint32_t i = 0; i < scene_state.max_lightmaps * 3; i++) {
+			uint32_t current_lightmap_index = i % scene_state.max_lightmaps;
 
 			if (p_render_data && current_lightmap_index < p_render_data->lightmaps->size()) {
 				RID base = light_storage->lightmap_instance_get_lightmap((*p_render_data->lightmaps)[current_lightmap_index]);
@@ -3415,17 +3422,22 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 				if (i < scene_state.max_lightmaps) {
 					// Lightmap
 					texture = light_storage->lightmap_get_texture(base);
-				} else {
+				} else if (i < scene_state.max_lightmaps * 2) {
 					// Shadowmask
 					texture = light_storage->shadowmask_get_texture(base);
+				} else {
+					texture = light_storage->sky_visibility_get_texture(base);
 				}
 
 				if (texture.is_valid()) {
 					RID rd_texture = texture_storage->texture_get_rd_texture(texture);
-					textures.write[i] = rd_texture;
-					continue;
+					if (i < scene_state.max_lightmaps * 2 || rd_texture.is_valid()) {
+						textures.write[i] = rd_texture;
+						continue;
+					}
 				}
 			}
+			// </ELIM>
 
 			textures.write[i] = default_tex;
 		}
@@ -3766,7 +3778,10 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 
 		RID default_tex = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
-		for (uint32_t i = 0; i < scene_state.max_lightmaps * 2; i++) {
+		// <ELIM> Lightmap, shadowmask and sky visibility per lightmap.
+		// for (uint32_t i = 0; i < scene_state.max_lightmaps * 2; i++) {
+		for (uint32_t i = 0; i < scene_state.max_lightmaps * 3; i++) {
+			// </ELIM>
 			u.append_id(default_tex);
 		}
 

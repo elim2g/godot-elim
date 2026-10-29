@@ -324,6 +324,15 @@ void LightmapGIData::set_emitter_specular(bool p_enable) {
 bool LightmapGIData::is_emitter_specular_enabled() const {
 	return emitter_specular;
 }
+
+void LightmapGIData::set_sky_visibility_texture(const Ref<TextureLayered> &p_texture) {
+	sky_visibility_texture = p_texture;
+	RS::get_singleton()->lightmap_set_sky_visibility_texture(lightmap, sky_visibility_texture.is_valid() ? sky_visibility_texture->get_rid() : RID());
+}
+
+Ref<TextureLayered> LightmapGIData::get_sky_visibility_texture() const {
+	return sky_visibility_texture;
+}
 // </ELIM>
 
 Dictionary LightmapGIData::_get_probe_data() const {
@@ -397,6 +406,8 @@ void LightmapGIData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_emitter_arcs"), &LightmapGIData::has_emitter_arcs);
 	ClassDB::bind_method(D_METHOD("set_emitter_specular", "enable"), &LightmapGIData::set_emitter_specular);
 	ClassDB::bind_method(D_METHOD("is_emitter_specular_enabled"), &LightmapGIData::is_emitter_specular_enabled);
+	ClassDB::bind_method(D_METHOD("set_sky_visibility_texture", "texture"), &LightmapGIData::set_sky_visibility_texture);
+	ClassDB::bind_method(D_METHOD("get_sky_visibility_texture"), &LightmapGIData::get_sky_visibility_texture);
 	// </ELIM>
 
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "lightmap_textures", PROPERTY_HINT_ARRAY_TYPE, "TextureLayered", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_READ_ONLY), "set_lightmap_textures", "get_lightmap_textures");
@@ -408,6 +419,7 @@ void LightmapGIData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "surface_lights", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_surface_lights", "get_surface_lights");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "emitter_arcs", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_emitter_arcs", "has_emitter_arcs");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "emitter_specular", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_emitter_specular", "is_emitter_specular_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "sky_visibility_texture", PROPERTY_HINT_RESOURCE_TYPE, "TextureLayered", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_sky_visibility_texture", "get_sky_visibility_texture");
 	// </ELIM>
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "_uses_packed_directional", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_uses_packed_directional", "_is_using_packed_directional");
 
@@ -924,6 +936,32 @@ void LightmapGI::_gen_new_positions_from_octree(const GenProbesOctree *p_cell, f
 		}
 	}
 }
+
+// <ELIM> Sky visibility is always embedded uncompressed (R8, raw bytes in the
+// saved resource), in the editor too: it is never imported or block-compressed.
+Ref<TextureLayered> LightmapGI::_pack_sky_visibility(const Ref<Lightmapper> &p_lightmapper) const {
+	const int count = p_lightmapper->get_sky_visibility_texture_count();
+	if (count == 0) {
+		return Ref<TextureLayered>();
+	}
+
+	Vector<Ref<Image>> slices;
+	for (int i = 0; i < count; i++) {
+		Ref<Image> slice = p_lightmapper->get_sky_visibility_texture(i);
+		ERR_FAIL_COND_V(slice.is_null(), Ref<TextureLayered>());
+		if (supersampling_enabled) {
+			slice = slice->duplicate();
+			slice->resize(slice->get_width() / supersampling_factor, slice->get_height() / supersampling_factor, Image::INTERPOLATE_TRILINEAR);
+		}
+		slices.push_back(slice);
+	}
+
+	Ref<Texture2DArray> texture;
+	texture.instantiate();
+	ERR_FAIL_COND_V(texture->create_from_images(slices) != OK, Ref<TextureLayered>());
+	return texture;
+}
+// </ELIM>
 
 LightmapGI::BakeError LightmapGI::_save_and_reimport_atlas_textures(const Ref<Lightmapper> p_lightmapper, const String &p_base_name, TypedArray<TextureLayered> &r_textures, bool p_is_shadowmask) const {
 	Vector<Ref<Image>> images;
@@ -2881,6 +2919,7 @@ LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Li
 	}
 	// <ELIM> Set every bake: reused data must not keep a previous bake's layout.
 	gi_data->set_emitter_arcs(save_shadowmask && lightmapper->get_emitter_arcs());
+	gi_data->set_sky_visibility_texture(_pack_sky_visibility(lightmapper));
 	// </ELIM>
 
 	gi_data->set_uses_spherical_harmonics(directional);

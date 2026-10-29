@@ -328,6 +328,7 @@ class LightmapperRD : public Lightmapper {
 	Vector<Ref<Image>> shadowmask_textures;
 	// <ELIM> shadowmask_textures holds emitter-arc layer pairs (see get_emitter_arcs).
 	bool emitter_arcs = false;
+	Vector<Ref<Image>> sky_visibility_textures;
 	BakeError _pack_emitter_arcs(RenderingDevice *rd, Ref<RDShaderFile> &compute_shader, RID &compute_base_uniform_set, PushConstant &push_constant, RID p_arc_a_tex, RID p_arc_b_tex, RID p_shadowmask_tex, RID p_dest_a_tex, RID p_dest_b_tex, const Size2i &atlas_size, int atlas_slices);
 	// </ELIM>
 	Vector<Color> probe_values;
@@ -380,6 +381,8 @@ public:
 	Ref<Image> get_shadowmask_texture(int p_index) const override;
 	// <ELIM>
 	bool get_emitter_arcs() const override { return emitter_arcs; }
+	int get_sky_visibility_texture_count() const override { return sky_visibility_textures.size(); }
+	Ref<Image> get_sky_visibility_texture(int p_index) const override;
 	// </ELIM>
 	int get_bake_mesh_count() const override;
 	Variant get_bake_mesh_userdata(int p_index) const override;

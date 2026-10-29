@@ -78,6 +78,10 @@ private:
 	bool emitter_arcs = false;
 	bool emitter_specular = true;
 	void _update_emitter_arcs();
+
+	// Sky visibility (Lightmapper::get_sky_visibility_texture): one uncompressed R8
+	// layer per atlas slice; stored. Drives the sky reflection's occlusion.
+	Ref<TextureLayered> sky_visibility_texture;
 	// </ELIM>
 
 	RID lightmap;
@@ -150,6 +154,8 @@ public:
 	bool has_emitter_arcs() const;
 	void set_emitter_specular(bool p_enable);
 	bool is_emitter_specular_enabled() const;
+	void set_sky_visibility_texture(const Ref<TextureLayered> &p_texture);
+	Ref<TextureLayered> get_sky_visibility_texture() const;
 	// </ELIM>
 
 	void clear();
@@ -321,6 +327,9 @@ private:
 	void _gen_new_positions_from_octree(const GenProbesOctree *p_cell, float p_cell_size, const Vector<Vector3> &probe_positions, LocalVector<Vector3> &new_probe_positions, HashMap<Vector3i, bool> &positions_used, const AABB &p_bounds);
 
 	BakeError _save_and_reimport_atlas_textures(const Ref<Lightmapper> p_lightmapper, const String &p_base_name, TypedArray<TextureLayered> &r_textures, bool p_is_shadowmask = false) const;
+	// <ELIM>
+	Ref<TextureLayered> _pack_sky_visibility(const Ref<Lightmapper> &p_lightmapper) const;
+	// </ELIM>
 
 	// <ELIM> The three phases bake() is split into (see BakeState above).
 	BakeError _bake_prepare_internal(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata, BakeState &r_state);

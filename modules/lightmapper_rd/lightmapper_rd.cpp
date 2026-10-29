@@ -1329,6 +1329,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	shadowmask_textures.clear();
 	// <ELIM>
 	emitter_arcs = false;
+	sky_visibility_textures.clear();
 	// </ELIM>
 	int grid_size = 128;
 
@@ -1366,6 +1367,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	// Emitter arcs ride the shadowmask request but not its sun requirement: a map
 	// without a sun still has emitters to shade.
 	const bool bake_emitter_arcs = p_bake_shadowmask;
+	// Sky visibility comes from the first bounce, so it needs bounces; it rides the
+	// same request as the arcs.
+	const bool bake_sky_visibility = p_bake_shadowmask && p_bounces > 0;
 	if (p_bake_shadowmask) {
 		bool found = false;
 		for (int i = 0; i < lights.size(); i++) {
@@ -1442,6 +1446,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	RID arc_b_tex;
 	RID arc_out_a_tex;
 	RID arc_out_b_tex;
+	// Sky visibility, and its denoise/dilate partner (created when first needed).
+	RID sky_tex;
+	RID sky_tex2;
 	// </ELIM>
 
 	// <ELIM> Also frees the emitter-arc textures that were created.
@@ -1484,6 +1491,12 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	}                                      \
 	if (arc_out_b_tex.is_valid()) {        \
 		rd->free_rid(arc_out_b_tex);       \
+	}                                      \
+	if (sky_tex.is_valid()) {              \
+		rd->free_rid(sky_tex);             \
+	}                                      \
+	if (sky_tex2.is_valid()) {             \
+		rd->free_rid(sky_tex2);            \
 	}
 	// </ELIM>
 
@@ -1540,6 +1553,13 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			rd->texture_clear(arc_a_tex, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
 			arc_b_tex = rd->texture_create(tf, RD::TextureView());
 			rd->texture_clear(arc_b_tex, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
+		}
+
+		// Sky visibility: alpha 0 = not processed, for dilate.
+		if (bake_sky_visibility) {
+			tf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+			sky_tex = rd->texture_create(tf, RD::TextureView());
+			rd->texture_clear(sky_tex, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
 		}
 		// </ELIM>
 
@@ -1911,6 +1931,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	// <ELIM>
 	if (bake_emitter_arcs) {
 		defines += "\n#define USE_EMITTER_ARCS\n";
+	}
+	if (bake_sky_visibility) {
+		defines += "\n#define USE_SKY_VISIBILITY\n";
 	}
 	// </ELIM>
 
@@ -2344,6 +2367,15 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				u.append_id(light_environment_tex);
 				uniforms.push_back(u);
 			}
+			// <ELIM>
+			if (bake_sky_visibility) {
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.binding = 6;
+				u.append_id(sky_tex);
+				uniforms.push_back(u);
+			}
+			// </ELIM>
 		}
 
 		RID secondary_uniform_set;
@@ -2603,6 +2635,17 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				return error;
 			}
 		}
+
+		// <ELIM> Sky visibility: JNLM only (a [0, 1] field like the shadowmask).
+		if (bake_sky_visibility) {
+			sky_tex2 = rd->texture_create(rd->texture_get_format(sky_tex), RD::TextureView());
+			SWAP(sky_tex, sky_tex2);
+			BakeError error = _denoise(rd, compute_shader, compute_base_uniform_set, push_constant, sky_tex2, normal_tex, sky_tex, unocclude_tex, p_denoiser_strength, p_denoiser_range, atlas_size, atlas_slices, false, p_step_function, p_bake_userdata);
+			if (unlikely(error != BAKE_OK)) {
+				return error;
+			}
+		}
+		// </ELIM>
 	}
 
 	/* DILATE */
@@ -2621,6 +2664,19 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				return error;
 			}
 		}
+
+		// <ELIM> Sky visibility into the chart gutters, for bilinear filtering.
+		if (bake_sky_visibility) {
+			if (sky_tex2.is_null()) {
+				sky_tex2 = rd->texture_create(rd->texture_get_format(sky_tex), RD::TextureView());
+			}
+			SWAP(sky_tex, sky_tex2);
+			error = _dilate(rd, compute_shader, compute_base_uniform_set, push_constant, sky_tex2, sky_tex, atlas_size, atlas_slices);
+			if (unlikely(error != BAKE_OK)) {
+				return error;
+			}
+		}
+		// </ELIM>
 
 		// <ELIM> Emitter arcs: compose the shipped layer pairs with the dilated sun
 		// mask (the arc textures stand in when there is no sun; the shader ignores
@@ -2842,6 +2898,17 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		}
 	}
 
+	// <ELIM>
+	if (bake_sky_visibility) {
+		for (int i = 0; i < atlas_slices; i++) {
+			Vector<uint8_t> s = rd->texture_get_data(sky_tex, i);
+			Ref<Image> img = Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBA8, s);
+			img->convert(Image::FORMAT_R8);
+			sky_visibility_textures.push_back(img);
+		}
+	}
+	// </ELIM>
+
 	if (probe_positions.size() > 0) {
 		probe_values.resize(probe_positions.size() * 9);
 		Vector<uint8_t> probe_data = rd->buffer_get_data(light_probe_buffer);
@@ -2888,6 +2955,13 @@ Ref<Image> LightmapperRD::get_shadowmask_texture(int p_index) const {
 	ERR_FAIL_INDEX_V(p_index, shadowmask_textures.size(), Ref<Image>());
 	return shadowmask_textures[p_index];
 }
+
+// <ELIM>
+Ref<Image> LightmapperRD::get_sky_visibility_texture(int p_index) const {
+	ERR_FAIL_INDEX_V(p_index, sky_visibility_textures.size(), Ref<Image>());
+	return sky_visibility_textures[p_index];
+}
+// </ELIM>
 
 int LightmapperRD::get_bake_mesh_count() const {
 	return mesh_instances.size();

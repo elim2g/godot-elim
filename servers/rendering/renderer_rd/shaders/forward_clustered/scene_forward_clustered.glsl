@@ -1751,6 +1751,9 @@ void fragment_shader(in SceneData scene_data) {
 	// Gate for LIGHT_BAKE_STATIC_SPECULAR omni/spot proxies (emitter highlights). Set
 	// alongside lm_direct_spec_occ; 0 keeps the upstream skip for those lights too.
 	float lm_spec_light_gate = 0.0;
+	// Baked sky visibility of this texel (cosine-weighted, 0..1); negative when the
+	// bake has none, which keeps the brightness-based occlusion below.
+	float lm_sky_visibility = -1.0;
 	// </ELIM>
 #ifndef MODE_UNSHADED
 	// Used in regular draw pass and when drawing SDFs for SDFGI and materials for VoxelGI.
@@ -1943,6 +1946,12 @@ void fragment_shader(in SceneData scene_data) {
 		uvw.xy = uv2 * instances.data[instance_index].lightmap_uv_scale.zw + instances.data[instance_index].lightmap_uv_scale.xy;
 		uvw.z = float(slice);
 
+		// <ELIM> One layer per slice, sampled before the SH path rescales uvw.z.
+		if (bool(lightmaps.data[ofs].flags & LIGHTMAP_FLAG_SKY_VISIBILITY)) {
+			lm_sky_visibility = textureLod(sampler2DArray(lightmap_textures[MAX_LIGHTMAP_TEXTURES * 2u + ofs], SAMPLER_LINEAR_CLAMP), uvw, 0.0).r;
+		}
+		// </ELIM>
+
 		if (uses_sh) {
 			uvw.z *= 4.0; //SH textures use 4 times more data
 			vec3 lm_light_l0;
@@ -1996,7 +2005,19 @@ void fragment_shader(in SceneData scene_data) {
 		float lm_luma = dot(lm_dc_radiance, vec3(0.2126, 0.7152, 0.0722));
 		float lm_occ = clamp(lm_luma / scene_data.reflection_lightmap_occlusion_reference, 0.0, 1.0);
 		lm_occ *= lm_occ;
-		indirect_specular_light *= lm_occ;
+		// Brightness is not sky visibility: a lamp- or emitter-lit room is as bright as
+		// open sky without seeing any. With baked sky visibility, the sky reflection
+		// follows that instead, through Lagarde's specular occlusion from AO (Moving
+		// Frostbite to PBR, 2014), which tightens the occlusion for glossy surfaces
+		// and grazing views. Direct specular below keeps the brightness gate.
+		// indirect_specular_light *= lm_occ;
+		if (lm_sky_visibility >= 0.0) {
+			float sky_n_dot_v = clamp(dot(normal, view), 0.0, 1.0);
+			float sky_alpha = roughness * roughness;
+			indirect_specular_light *= clamp(pow(sky_n_dot_v + lm_sky_visibility, exp2(-16.0 * sky_alpha - 1.0)) - 1.0 + lm_sky_visibility, 0.0, 1.0);
+		} else {
+			indirect_specular_light *= lm_occ;
+		}
 		// Same factor drives baked-light direct specular in the directional loop.
 		lm_direct_spec_occ = lm_occ;
 		// Emitter-proxy gate. The knee above asks "as bright as open sky?", which is

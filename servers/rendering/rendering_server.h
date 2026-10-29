@@ -777,6 +777,9 @@ public:
 	// in the first layer's alpha). p_enabled: shade them. Forward+ only; other
 	// renderers treat an arc layout as no shadowmask.
 	virtual void lightmap_set_emitter_arcs(RID p_lightmap, bool p_has_arcs, bool p_enabled) = 0;
+	// Per-texel sky visibility (R8 array, one layer per slice); RID() = none. Forward+
+	// drives sky-reflection occlusion from it; other renderers ignore it.
+	virtual void lightmap_set_sky_visibility_texture(RID p_lightmap, RID p_texture) = 0;
 	// </ELIM>
 
 	/* PARTICLES API */
