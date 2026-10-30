@@ -253,7 +253,7 @@ class LightmapperRD : public Lightmapper {
 	Vector<LightMetadata> light_metadata;
 	// <ELIM> Flat vec4 stream backing the PolyVerts SSBO (binding 13): triangle
 	// vertex triples for analytic surface-light island polygons. See
-	// lm_common_inc.glsl for the layout contract (bias-offset xyz, CDF in w).
+	// lm_common_inc.glsl for the layout contract (bias-offset xyz, w unused).
 	LocalVector<float> poly_verts_data;
 	// </ELIM>
 
@@ -329,7 +329,7 @@ class LightmapperRD : public Lightmapper {
 	// <ELIM> shadowmask_textures holds emitter-arc layer pairs (see get_emitter_arcs).
 	bool emitter_arcs = false;
 	Vector<Ref<Image>> sky_visibility_textures;
-	BakeError _pack_emitter_arcs(RenderingDevice *rd, Ref<RDShaderFile> &compute_shader, RID &compute_base_uniform_set, PushConstant &push_constant, RID p_arc_a_tex, RID p_arc_b_tex, RID p_shadowmask_tex, RID p_dest_a_tex, RID p_dest_b_tex, const Size2i &atlas_size, int atlas_slices);
+	BakeError _pack_emitter_arcs(RenderingDevice *rd, const Ref<RDShaderFile> &compute_shader, RID compute_base_uniform_set, const PushConstant &p_push_constant, RID p_arc_a_tex, RID p_arc_b_tex, RID p_shadowmask_tex, RID p_dest_a_tex, RID p_dest_b_tex, const Size2i &atlas_size, int atlas_slices);
 	// </ELIM>
 	Vector<Color> probe_values;
 

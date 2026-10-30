@@ -1012,7 +1012,7 @@ LightmapperRD::BakeError LightmapperRD::_dilate(RenderingDevice *rd, Ref<RDShade
 
 // <ELIM> Composes and dilates the emitter-arc layer pairs (lm_compute.glsl
 // MODE_PACK_EMITTER_ARCS).
-LightmapperRD::BakeError LightmapperRD::_pack_emitter_arcs(RenderingDevice *rd, Ref<RDShaderFile> &compute_shader, RID &compute_base_uniform_set, PushConstant &push_constant, RID p_arc_a_tex, RID p_arc_b_tex, RID p_shadowmask_tex, RID p_dest_a_tex, RID p_dest_b_tex, const Size2i &atlas_size, int atlas_slices) {
+LightmapperRD::BakeError LightmapperRD::_pack_emitter_arcs(RenderingDevice *rd, const Ref<RDShaderFile> &compute_shader, RID compute_base_uniform_set, const PushConstant &p_push_constant, RID p_arc_a_tex, RID p_arc_b_tex, RID p_shadowmask_tex, RID p_dest_a_tex, RID p_dest_b_tex, const Size2i &atlas_size, int atlas_slices) {
 	Vector<RD::Uniform> uniforms;
 	const RID bindings[5] = { p_dest_a_tex, p_dest_b_tex, p_arc_a_tex, p_arc_b_tex, p_shadowmask_tex };
 	for (int i = 0; i < 5; i++) {
@@ -1033,6 +1033,8 @@ LightmapperRD::BakeError LightmapperRD::_pack_emitter_arcs(RenderingDevice *rd, 
 	rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_pack_pipeline);
 	rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
 	rd->compute_list_bind_uniform_set(compute_list, pack_uniform_set, 1);
+	// A copy: the caller's push constant is bake-global state.
+	PushConstant push_constant = p_push_constant;
 	push_constant.region_ofs[0] = 0;
 	push_constant.region_ofs[1] = 0;
 	Vector3i group_size(Math::division_round_up(atlas_size.x, 8), Math::division_round_up(atlas_size.y, 8), 1);
@@ -1291,6 +1293,20 @@ LightmapperRD::BakeError LightmapperRD::_denoise(RenderingDevice *p_rd, Ref<RDSh
 
 	return BAKE_OK;
 }
+
+// <ELIM> End (exclusive) of the direct-light batch starting at p_from: greedy by
+// cost under p_budget, at most p_max_lights lights, never empty.
+static int _next_light_batch_end(const LocalVector<int64_t> &p_costs, int p_from, int p_max_lights, int64_t p_budget) {
+	const int count = (int)p_costs.size();
+	int to = p_from;
+	int64_t acc = 0;
+	while (to < count && (to - p_from) < p_max_lights && (to == p_from || acc + p_costs[to] <= p_budget)) {
+		acc += p_costs[to];
+		to++;
+	}
+	return to;
+}
+// </ELIM>
 
 LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function, void *p_bake_userdata, float p_exposure_normalization, float p_supersampling_factor, /* <ELIM> */ float p_bounce_saturation /* </ELIM> */) {
 	int denoiser = GLOBAL_GET("rendering/lightmapping/denoising/denoiser");
@@ -2150,24 +2166,12 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 		RID light_uniform_set = rd->uniform_set_create(uniforms, compute_shader_primary, 1);
 
-		// <ELIM> TDR guard: the direct pass evaluates every light for every texel
-		// (lm_compute.glsl MODE_DIRECT_LIGHT), so a single dispatch costs
-		// O(region_texels * lights * shadow_rays). Emissive surface-light maps push
-		// the light count into the thousands, making one region dispatch run long
-		// enough to trip the GPU driver's watchdog (DEVICE_REMOVED). A fixed
-		// light-batch size is too coarse: at FULL/ULTRA quality each light fires
-		// ~ray_count soft-shadow rays per texel (16x more than LOW/quickbake), so a
-		// batch safe at LOW still blows the ~2s watchdog at FULL. Instead, size each
-		// batch by ESTIMATED WORST-CASE TRACES: region_texels * lights * rays_per_texel
-		// must stay under max_traces_per_dispatch. rays_per_texel mirrors the shader's
-		// soft-shadow sampling exactly: AA_SAMPLES * shadowing_ray_count, with
-		// AA_SAMPLES = 16 and shadowing_ray_count = max(1, ray_count / AA_SAMPLES).
-		// Each batch is its own dispatch + submit()/sync(), so no single dispatch can
-		// trip the watchdog regardless of quality. When the whole light set fits in
-		// one batch (typical non-emissive maps, and quickbake's low ray count) the
-		// shader takes its first_light_batch imageStore path — bit-identical to
-		// upstream. lights_per_pass is computed per region below (from the region's
-		// actual texel count); the values here drive the once-per-bake diagnostic.
+		// <ELIM> TDR guard: the direct pass evaluates every light for every texel, so
+		// one dispatch costs region_texels * sum(light cost), and thousands of
+		// emitter lights at high ray counts trip the GPU watchdog. Lights are split
+		// into batches whose estimated worst-case traces stay under
+		// max_traces_per_dispatch, one dispatch + sync each. A light set that fits
+		// one batch takes the shader's first_light_batch store path, as upstream.
 		const int total_light_count = (int)lights.size();
 		const int max_lights_per_pass = MAX(1, (int)GLOBAL_GET("rendering/lightmapping/bake_performance/max_lights_per_pass"));
 		const int64_t max_traces_per_dispatch = MAX((int64_t)1, (int64_t)GLOBAL_GET("rendering/lightmapping/bake_performance/max_traces_per_dispatch"));
@@ -2175,15 +2179,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		// (const int AA_SAMPLES = 16; shadowing_ray_count = max(1, ray_count / 16)).
 		const int64_t aa_samples = 16;
 		const int64_t rays_per_texel = aa_samples * MAX((int64_t)1, (int64_t)push_constant.ray_count / aa_samples);
-		// Per-light per-texel cost weight. Every light costs its soft-shadow
-		// traces; an AREA_POLY light additionally walks its polygon TWICE per
-		// texel (once for the analytic irradiance, once to hand visibility rays
-		// out by contribution), work the trace count alone cannot see. Charging
-		// two trace-equivalents per polygon triangle keeps a geometrically complex
-		// emitter island from silently inflating a dispatch past the watchdog, so
-		// the collector's per-island triangle cap can be generous. The term is
-		// ADDITIVE on top of the trace-only model, so batches can only get
-		// smaller than before — never larger.
+		// Per-light per-texel cost in trace-equivalents. An AREA_POLY light also
+		// walks its polygon twice per texel (irradiance, then ray allocation), so
+		// each of its triangles is charged two traces on top.
 		LocalVector<int64_t> light_cost;
 		light_cost.resize(total_light_count);
 		int64_t poly_tris_total = 0;
@@ -2204,13 +2202,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			const int64_t rep_texels = (int64_t)max_region_size * (int64_t)max_region_size;
 			const int64_t rep_budget = MAX((int64_t)1, max_traces_per_dispatch / rep_texels);
 			int rep_iterations = 0;
-			for (int li = 0; li < total_light_count;) {
-				int64_t acc = 0;
-				const int batch_start = li;
-				while (li < total_light_count && (li - batch_start) < max_lights_per_pass && (li == batch_start || acc + light_cost[li] <= rep_budget)) {
-					acc += light_cost[li];
-					li++;
-				}
+			for (int li = 0; li < total_light_count; li = _next_light_batch_end(light_cost, li, max_lights_per_pass, rep_budget)) {
 				rep_iterations++;
 			}
 			rep_iterations = MAX(1, rep_iterations);
@@ -2234,14 +2226,10 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 					push_constant.region_ofs[1] = y;
 
 					group_size = Vector3i(Math::division_round_up(w, 8), Math::division_round_up(h, 8), 1);
-					// <ELIM> Cost-aware light-batch loop (TDR guard). Batch size comes
-					// from this region's ACTUAL texel count, so no dispatch exceeds
-					// max_traces_per_dispatch worst-case traces. Each batch is its own
-					// dispatch + submit()/sync(), so batch k's accumulator writes are
-					// visible to batch k+1's read-modify-write, and no dispatch is long
-					// enough to trip the GPU watchdog. Batch 0 initializes the outputs;
-					// later batches add (see lm_compute.glsl first_light_batch). A single
-					// batch (light set fits the budget) == the original single dispatch.
+					// <ELIM> Cost-aware light batches sized from this region's texel
+					// count. The sync between batches makes batch k's accumulator writes
+					// visible to batch k+1's read-modify-write; batch 0 initializes the
+					// outputs (lm_compute.glsl first_light_batch).
 					// RD::ComputeListID compute_list = rd->compute_list_begin();
 					// rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_primary_pipeline);
 					// rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
@@ -2257,12 +2245,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 					// do/while: with no lights at all the region still needs its one
 					// dispatch, which is what initializes the outputs (first_light_batch).
 					do {
-						int light_to = light_from;
-						int64_t acc = 0;
-						while (light_to < total_light_count && (light_to - light_from) < max_lights_per_pass && (light_to == light_from || acc + light_cost[light_to] <= budget)) {
-							acc += light_cost[light_to];
-							light_to++;
-						}
+						const int light_to = _next_light_batch_end(light_cost, light_from, max_lights_per_pass, budget);
 						push_constant.light_from = (uint32_t)light_from;
 						push_constant.light_to = (uint32_t)light_to;
 						light_from = light_to;
@@ -2572,12 +2555,31 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	}
 #endif
 
+	// <ELIM> Teardown for a failed or aborted pass after the light probes. A bare
+	// return leaks the local RenderingDevice and everything on it.
+#define FREE_ALL_AFTER_PROBES             \
+	FREE_TEXTURES                         \
+	FREE_BUFFERS                          \
+	FREE_RASTER_RESOURCES                 \
+	FREE_COMPUTE_RESOURCES                \
+	if (probe_positions.size() > 0) {     \
+		rd->free_rid(light_probe_buffer); \
+	}                                     \
+	memdelete(rd);                        \
+	if (rcd != nullptr) {                 \
+		memdelete(rcd);                   \
+	}
+	// </ELIM>
+
 	/* DENOISE */
 
 	if (p_bake_sh) {
 		SWAP(light_accum_tex, light_accum_tex2);
 		BakeError error = _pack_l1(rd, compute_shader, compute_base_uniform_set, push_constant, light_accum_tex2, light_accum_tex, atlas_size, atlas_slices);
 		if (unlikely(error != BAKE_OK)) {
+			// <ELIM> Tear down the local device instead of leaking it.
+			FREE_ALL_AFTER_PROBES
+			// </ELIM>
 			return error;
 		}
 	}
@@ -2614,6 +2616,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				error = _denoise(rd, compute_shader, compute_base_uniform_set, push_constant, light_accum_tex2, normal_tex, light_accum_tex, unocclude_tex, p_denoiser_strength, p_denoiser_range, atlas_size, atlas_slices, p_bake_sh, p_step_function, p_bake_userdata);
 			}
 			if (unlikely(error != BAKE_OK)) {
+				// <ELIM> Tear down the local device instead of leaking it.
+				FREE_ALL_AFTER_PROBES
+				// </ELIM>
 				return error;
 			}
 		}
@@ -2632,6 +2637,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				error = _denoise(rd, compute_shader, compute_base_uniform_set, push_constant, shadowmask_tex2, normal_tex, shadowmask_tex, unocclude_tex, p_denoiser_strength, p_denoiser_range, atlas_size, atlas_slices, false, p_step_function, p_bake_userdata);
 			}
 			if (unlikely(error != BAKE_OK)) {
+				// <ELIM> Tear down the local device instead of leaking it.
+				FREE_ALL_AFTER_PROBES
+				// </ELIM>
 				return error;
 			}
 		}
@@ -2642,6 +2650,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			SWAP(sky_tex, sky_tex2);
 			BakeError error = _denoise(rd, compute_shader, compute_base_uniform_set, push_constant, sky_tex2, normal_tex, sky_tex, unocclude_tex, p_denoiser_strength, p_denoiser_range, atlas_size, atlas_slices, false, p_step_function, p_bake_userdata);
 			if (unlikely(error != BAKE_OK)) {
+				FREE_ALL_AFTER_PROBES
 				return error;
 			}
 		}
@@ -2654,6 +2663,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		SWAP(light_accum_tex, light_accum_tex2);
 		BakeError error = _dilate(rd, compute_shader, compute_base_uniform_set, push_constant, light_accum_tex2, light_accum_tex, atlas_size, atlas_slices * (p_bake_sh ? 4 : 1));
 		if (unlikely(error != BAKE_OK)) {
+			// <ELIM> Tear down the local device instead of leaking it.
+			FREE_ALL_AFTER_PROBES
+			// </ELIM>
 			return error;
 		}
 
@@ -2661,6 +2673,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			SWAP(shadowmask_tex, shadowmask_tex2);
 			error = _dilate(rd, compute_shader, compute_base_uniform_set, push_constant, shadowmask_tex2, shadowmask_tex, atlas_size, atlas_slices);
 			if (unlikely(error != BAKE_OK)) {
+				// <ELIM> Tear down the local device instead of leaking it.
+				FREE_ALL_AFTER_PROBES
+				// </ELIM>
 				return error;
 			}
 		}
@@ -2673,6 +2688,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			SWAP(sky_tex, sky_tex2);
 			error = _dilate(rd, compute_shader, compute_base_uniform_set, push_constant, sky_tex2, sky_tex, atlas_size, atlas_slices);
 			if (unlikely(error != BAKE_OK)) {
+				FREE_ALL_AFTER_PROBES
 				return error;
 			}
 		}
@@ -2688,6 +2704,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			arc_out_b_tex = rd->texture_create(arc_tf, RD::TextureView());
 			error = _pack_emitter_arcs(rd, compute_shader, compute_base_uniform_set, push_constant, arc_a_tex, arc_b_tex, p_bake_shadowmask ? shadowmask_tex : arc_a_tex, arc_out_a_tex, arc_out_b_tex, atlas_size, atlas_slices);
 			if (unlikely(error != BAKE_OK)) {
+				FREE_ALL_AFTER_PROBES
 				return error;
 			}
 			rd->free_rid(arc_a_tex);

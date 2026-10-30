@@ -890,23 +890,12 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 			return;
 		}
 
-		// PASS 2: visibility as a CONTRIBUTION-weighted ratio estimator.
-		//
-		// The analytic term above is dominated by whatever part of the island is
-		// nearest this texel. Sampling visibility uniformly over the island's AREA
-		// therefore measures the wrong thing, and the error is unbounded: on
-		// dfwc2017-6 a wall pressed against one corner of a 337 m lava island drew
-		// 90% of its irradiance from 2 of 64 triangles holding 3.4% of the area,
-		// so ~97% of its rays probed lava 170 m away behind walls. Visibility
-		// collapsed to a few percent and the wall baked black while a neighbour
-		// beside a smaller island lit correctly — the on/off pattern tracked which
-		// island a surface bordered, not its local geometry. More rays could not
-		// help: the estimator was biased, not noisy.
-		//
-		// So rays are handed out in proportion to each triangle's contribution and
-		// the results recombined the same way, giving sum(E_t * V_t) instead of
-		// sum(E_t) * V_uniform. With V == 1 everywhere this is identical to the
-		// old path, so the closed-form leak-meter result is unchanged.
+		// PASS 2: visibility as a CONTRIBUTION-weighted ratio estimator. The
+		// irradiance is dominated by the part of the island nearest the texel, so
+		// area-uniform visibility sampling is biased (unboundedly, for a receiver
+		// beside one corner of a large island). Rays are handed out in proportion
+		// to each triangle's contribution and recombined the same way, estimating
+		// sum(E_t * V_t) rather than sum(E_t) * V_uniform; with V == 1 the two agree.
 		uint vis_rays = p_soft_shadowing ? max(params.surface_light_vis_rays, 1u) : 1u;
 		// Texel-AA origin jitter, capped in world units for the same reason as the
 		// punctual paths (meter-scale texels relocate origins through walls); the
