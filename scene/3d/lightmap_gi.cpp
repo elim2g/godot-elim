@@ -1959,6 +1959,7 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 			}
 
 			// Emission colour (linear) + energy come from the emitter material.
+			const Ref<BaseMaterial3D> bm = eff_mat;
 			const Color island_color = bm->get_emission().srgb_to_linear();
 			const float island_energy = bm->get_emission_energy_multiplier();
 
