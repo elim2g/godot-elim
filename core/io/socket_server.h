@@ -38,7 +38,11 @@ class SocketServer : public RefCounted {
 
 protected:
 	enum {
-		MAX_PENDING_CONNECTIONS = 8,
+		// <ELIM> A server restart sees a burst of reconnecting clients; past the
+		// backlog the OS refuses them before the server can answer with a backoff.
+		// MAX_PENDING_CONNECTIONS = 8,
+		MAX_PENDING_CONNECTIONS = 64,
+		// </ELIM>
 	};
 
 	Ref<NetSocket> _sock;
