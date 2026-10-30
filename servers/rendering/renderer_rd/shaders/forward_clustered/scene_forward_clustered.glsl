@@ -577,11 +577,7 @@ void vertex_shader(vec3 vertex_input,
 					continue; //not masked
 				}
 
-				// <ELIM> Vertex lighting cannot keep specular alone, so an emitter proxy
-				// (LIGHT_BAKE_STATIC_SPECULAR) is skipped like a static light here.
-				// if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-				if ((omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC || omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC_SPECULAR) && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-				// </ELIM>
+				if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 					continue; // Statically baked light and object uses lightmap, skip
 				}
 
@@ -616,11 +612,7 @@ void vertex_shader(vec3 vertex_input,
 					continue; //not masked
 				}
 
-				// <ELIM> Vertex lighting cannot keep specular alone, so an emitter proxy
-				// (LIGHT_BAKE_STATIC_SPECULAR) is skipped like a static light here.
-				// if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-				if ((spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC || spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC_SPECULAR) && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-				// </ELIM>
+				if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 					continue; // Statically baked light and object uses lightmap, skip
 				}
 
@@ -1742,15 +1734,12 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 diffuse_light = vec3(0.0, 0.0, 0.0);
 	vec3 ambient_light = vec3(0.0, 0.0, 0.0);
 	// <ELIM> Baked-map directional specular: how much baked light reaches this texel,
-	// 0 = none. Written by the Phase-2 lightmap-occlusion block below (USE_LIGHTMAP
+	// 0 = none. Written by the lightmap specular occlusion block below (USE_LIGHTMAP
 	// variants only) and consumed by the directional-light loop, where it both gates
 	// and shadows the specular-only contribution of statically baked lights. Staying
 	// 0 (unshaded, ambient disabled, no lightmap, or reference unset) means the loop
 	// keeps upstream behaviour and skips those lights entirely.
 	float lm_direct_spec_occ = 0.0;
-	// Gate for LIGHT_BAKE_STATIC_SPECULAR omni/spot proxies (emitter highlights). Set
-	// alongside lm_direct_spec_occ; 0 keeps the upstream skip for those lights too.
-	float lm_spec_light_gate = 0.0;
 	// Baked sky visibility of this texel (cosine-weighted, 0..1); negative when the
 	// bake has none, which keeps the brightness-based occlusion below.
 	float lm_sky_visibility = -1.0;
@@ -1810,10 +1799,10 @@ void fragment_shader(in SceneData scene_data) {
 		indirect_specular_light *= scene_data.ambient_light_color_energy.a;
 	}
 
-	// <ELIM> Phase-2 lightmap specular occlusion: non-lightmapped instances earn no
+	// <ELIM> Lightmap specular occlusion: non-lightmapped instances earn no
 	// unoccluded sky specular. Zero the sky-cubemap contribution here, before SSR and
-	// reflection-probe mixing, so those (earned) reflections survive. This matches the
-	// Phase-1 baseline for dynamic/filler geometry. reference==0 disables the feature.
+	// reflection-probe mixing, so those (earned) reflections survive.
+	// reference==0 disables the feature.
 #ifndef USE_LIGHTMAP
 	if (scene_data.reflection_lightmap_occlusion_reference > 0.0) {
 		indirect_specular_light = vec3(0.0);
@@ -1903,7 +1892,7 @@ void fragment_shader(in SceneData scene_data) {
 #ifndef AMBIENT_LIGHT_DISABLED
 #ifdef USE_LIGHTMAP
 
-	// <ELIM> Phase-2 lightmap specular occlusion: baked DC (L0) radiance, captured
+	// <ELIM> Lightmap specular occlusion: baked DC (L0) radiance, captured
 	// during lightmap sampling below and used to occlude sky-cubemap ambient specular.
 	vec3 lm_dc_radiance = vec3(0.0);
 	// </ELIM>
@@ -1934,7 +1923,7 @@ void fragment_shader(in SceneData scene_data) {
 								 c[4] * lightmap_captures.data[index].sh[8].rgb * (wnormal.x * wnormal.x - wnormal.y * wnormal.y)) *
 				scene_data.IBL_exposure_normalization;
 
-		// <ELIM> Phase-2: DC (l0) term of the SH probe = direction-independent irradiance.
+		// <ELIM> DC (l0) term of the SH probe = direction-independent irradiance.
 		lm_dc_radiance = c[0] * lightmap_captures.data[index].sh[0].rgb * scene_data.IBL_exposure_normalization;
 		// </ELIM>
 
@@ -1975,7 +1964,7 @@ void fragment_shader(in SceneData scene_data) {
 			float en = lightmaps.data[ofs].exposure_normalization;
 
 			ambient_light += lm_light_l0 * en;
-			// <ELIM> Phase-2: capture the DC (L0) radiance for specular occlusion.
+			// <ELIM> Capture the DC (L0) radiance for specular occlusion.
 			lm_dc_radiance = lm_light_l0 * en;
 			// </ELIM>
 			ambient_light += lm_light_l1n1 * n.y * (lm_light_l0 * en * 4.0);
@@ -1983,7 +1972,7 @@ void fragment_shader(in SceneData scene_data) {
 			ambient_light += lm_light_l1p1 * n.x * (lm_light_l0 * en * 4.0);
 
 		} else {
-			// <ELIM> Phase-2: capture the flat lightmap value as DC radiance for occlusion.
+			// <ELIM> Capture the flat lightmap value as DC radiance for occlusion.
 			vec3 lm_flat;
 			if (sc_use_lightmap_bicubic_filter()) {
 				lm_flat = textureArray_bicubic(lightmap_textures[ofs], uvw, lightmaps.data[ofs].light_texture_size).rgb * lightmaps.data[ofs].exposure_normalization;
@@ -1996,7 +1985,7 @@ void fragment_shader(in SceneData scene_data) {
 		}
 	}
 
-	// <ELIM> Phase-2 lightmap specular occlusion: scale sky-cubemap ambient specular
+	// <ELIM> Lightmap specular occlusion: scale sky-cubemap ambient specular
 	// by how much baked light actually reaches this texel. factor = clamp(luma(DC) /
 	// reference, 0, 1), squared for a soft matte-biased knee (under-occluding is the
 	// worse failure). Applied before SSR / reflection-probe mixing so those survive.
@@ -2020,17 +2009,10 @@ void fragment_shader(in SceneData scene_data) {
 		}
 		// Same factor drives baked-light direct specular in the directional loop.
 		lm_direct_spec_occ = lm_occ;
-		// Emitter-proxy gate. The knee above asks "as bright as open sky?", which is
-		// the right question for sky reflection but leaves a lamp-lit interior at a
-		// few percent. A proxy highlight only needs "does baked light reach this
-		// texel?", so its knee sits at 1/8 of the sky reference (about a lit room);
-		// the same matte-biased square rounds the minlight floor to ~0.
-		float lm_lit = clamp(lm_luma * 8.0 / scene_data.reflection_lightmap_occlusion_reference, 0.0, 1.0);
-		lm_spec_light_gate = lm_lit * lm_lit;
 	}
 	// </ELIM>
 
-	// <ELIM> Additive dimmed scene-ambient FILL on lightmapped surfaces (addendum).
+	// <ELIM> Additive scene-ambient fill on lightmapped surfaces.
 	// Upstream Forward+ gates sky ambient behind #ifndef USE_LIGHTMAP, so baked walls
 	// never saw the runtime ambient term; this adds it on top of the lightmap sample.
 	// scene_ambient is 0 when the ambient source is DISABLED (neutral for upstream and
@@ -3035,39 +3017,11 @@ void fragment_shader(in SceneData scene_data) {
 					continue; //not masked
 				}
 
-				// <ELIM> Emitter specular proxy (LIGHT_BAKE_STATIC_SPECULAR): a light standing
-				// in for a baked emitter island keeps only its specular on lightmapped
-				// geometry - the island's diffuse is already in the atlas - gated by the
-				// baked light reaching this texel (no shadow map; the bake is the
-				// visibility). Plain LIGHT_BAKE_STATIC keeps the upstream skip.
-				// if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-				// 	continue; // Statically baked light and object uses lightmap, skip
-				// }
-				bool lm_proxy_spec_only = false;
-				if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-					if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC) {
-						continue; // Statically baked light and object uses lightmap, skip
-					}
-					if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC_SPECULAR) {
-						if (lm_spec_light_gate <= 0.0 || omni_lights.data[light_index].specular_amount <= 0.0) {
-							continue;
-						}
-						lm_proxy_spec_only = true;
-					}
+				if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+					continue; // Statically baked light and object uses lightmap, skip
 				}
-				vec3 lm_proxy_diffuse_before = diffuse_light;
-				vec3 lm_proxy_specular_before = direct_specular_light;
-				// A panel is not a point: widen the lobe by its angular size (Karis 2013,
-				// alpha' = alpha + r / 2d) instead of Godot's cosine-offset size hack.
-				float lm_proxy_roughness = float(roughness);
-				if (lm_proxy_spec_only) {
-					float lm_proxy_dist = max(length(omni_lights.data[light_index].position - vertex), 0.001);
-					float lm_proxy_alpha = lm_proxy_roughness * lm_proxy_roughness + omni_lights.data[light_index].size / (2.0 * lm_proxy_dist);
-					lm_proxy_roughness = sqrt(clamp(lm_proxy_alpha, 0.0, 1.0));
-				}
-				// </ELIM>
 
-				light_process_omni(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, half(lm_proxy_roughness), metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
+				light_process_omni(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 						backlight,
 #endif
@@ -3087,12 +3041,6 @@ void fragment_shader(in SceneData scene_data) {
 						binormal, tangent, anisotropy,
 #endif
 						diffuse_light, direct_specular_light);
-				// <ELIM> Keep only the gated specular delta of a specular-only proxy.
-				if (lm_proxy_spec_only) {
-					diffuse_light = lm_proxy_diffuse_before;
-					direct_specular_light = lm_proxy_specular_before + (direct_specular_light - lm_proxy_specular_before) * lm_spec_light_gate;
-				}
-				// </ELIM>
 			}
 		}
 	}
@@ -3130,39 +3078,11 @@ void fragment_shader(in SceneData scene_data) {
 					continue; //not masked
 				}
 
-				// <ELIM> Emitter specular proxy (LIGHT_BAKE_STATIC_SPECULAR): a light standing
-				// in for a baked emitter island keeps only its specular on lightmapped
-				// geometry - the island's diffuse is already in the atlas - gated by the
-				// baked light reaching this texel (no shadow map; the bake is the
-				// visibility). Plain LIGHT_BAKE_STATIC keeps the upstream skip.
-				// if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-				// 	continue; // Statically baked light and object uses lightmap, skip
-				// }
-				bool lm_proxy_spec_only = false;
-				if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-					if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC) {
-						continue; // Statically baked light and object uses lightmap, skip
-					}
-					if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC_SPECULAR) {
-						if (lm_spec_light_gate <= 0.0 || spot_lights.data[light_index].specular_amount <= 0.0) {
-							continue;
-						}
-						lm_proxy_spec_only = true;
-					}
+				if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+					continue; // Statically baked light and object uses lightmap, skip
 				}
-				vec3 lm_proxy_diffuse_before = diffuse_light;
-				vec3 lm_proxy_specular_before = direct_specular_light;
-				// A panel is not a point: widen the lobe by its angular size (Karis 2013,
-				// alpha' = alpha + r / 2d) instead of Godot's cosine-offset size hack.
-				float lm_proxy_roughness = float(roughness);
-				if (lm_proxy_spec_only) {
-					float lm_proxy_dist = max(length(spot_lights.data[light_index].position - vertex), 0.001);
-					float lm_proxy_alpha = lm_proxy_roughness * lm_proxy_roughness + spot_lights.data[light_index].size / (2.0 * lm_proxy_dist);
-					lm_proxy_roughness = sqrt(clamp(lm_proxy_alpha, 0.0, 1.0));
-				}
-				// </ELIM>
 
-				light_process_spot(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, half(lm_proxy_roughness), metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
+				light_process_spot(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 						backlight,
 #endif
@@ -3182,12 +3102,6 @@ void fragment_shader(in SceneData scene_data) {
 						binormal, tangent, anisotropy,
 #endif
 						diffuse_light, direct_specular_light);
-				// <ELIM> Keep only the gated specular delta of a specular-only proxy.
-				if (lm_proxy_spec_only) {
-					diffuse_light = lm_proxy_diffuse_before;
-					direct_specular_light = lm_proxy_specular_before + (direct_specular_light - lm_proxy_specular_before) * lm_spec_light_gate;
-				}
-				// </ELIM>
 			}
 		}
 	}
