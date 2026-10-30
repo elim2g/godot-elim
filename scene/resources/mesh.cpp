@@ -2075,6 +2075,105 @@ struct ArrayMeshLightmapSurface {
 	uint64_t format = 0;
 };
 
+// <ELIM> Stages shared by lightmap_unwrap_cached and lightmap_unwrap_surfaces, so
+// both feed xatlas the same input and rebuild the same surfaces.
+
+// Appends one surface to the unwrap input: scaled vertices and normals, and its
+// non-degenerate triangles. r_surface.vertices receives the decoded surface.
+static void _lightmap_unwrap_add_surface(const Array &p_arrays, int p_surface_index, const Transform3D &p_transform, const Basis &p_normal_basis, ArrayMeshLightmapSurface &r_surface, LocalVector<float> &r_vertices, LocalVector<float> &r_normals, LocalVector<int> &r_indices, LocalVector<Pair<int, int>> &r_uv_indices) {
+	SurfaceTool::create_vertex_array_from_arrays(p_arrays, r_surface.vertices, &r_surface.format);
+
+	PackedVector3Array rvertices = p_arrays[Mesh::ARRAY_VERTEX];
+	int vc = rvertices.size();
+
+	PackedVector3Array rnormals = p_arrays[Mesh::ARRAY_NORMAL];
+
+	int vertex_ofs = r_vertices.size() / 3;
+
+	r_vertices.resize((vertex_ofs + vc) * 3);
+	r_normals.resize((vertex_ofs + vc) * 3);
+	r_uv_indices.resize(vertex_ofs + vc);
+
+	for (int j = 0; j < vc; j++) {
+		Vector3 v = p_transform.xform(rvertices[j]);
+		Vector3 n = p_normal_basis.xform(rnormals[j]).normalized();
+
+		r_vertices[(j + vertex_ofs) * 3 + 0] = v.x;
+		r_vertices[(j + vertex_ofs) * 3 + 1] = v.y;
+		r_vertices[(j + vertex_ofs) * 3 + 2] = v.z;
+		r_normals[(j + vertex_ofs) * 3 + 0] = n.x;
+		r_normals[(j + vertex_ofs) * 3 + 1] = n.y;
+		r_normals[(j + vertex_ofs) * 3 + 2] = n.z;
+		r_uv_indices[j + vertex_ofs] = Pair<int, int>(p_surface_index, j);
+	}
+
+	PackedInt32Array rindices = p_arrays[Mesh::ARRAY_INDEX];
+	int ic = rindices.size();
+
+	float eps = 1.19209290e-7F; // Taken from xatlas.h
+	if (ic == 0) {
+		for (int j = 0; j < vc / 3; j++) {
+			Vector3 p0 = p_transform.xform(rvertices[j * 3 + 0]);
+			Vector3 p1 = p_transform.xform(rvertices[j * 3 + 1]);
+			Vector3 p2 = p_transform.xform(rvertices[j * 3 + 2]);
+
+			if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
+				continue;
+			}
+
+			r_indices.push_back(vertex_ofs + j * 3 + 0);
+			r_indices.push_back(vertex_ofs + j * 3 + 1);
+			r_indices.push_back(vertex_ofs + j * 3 + 2);
+		}
+
+	} else {
+		for (int j = 0; j < ic / 3; j++) {
+			Vector3 p0 = p_transform.xform(rvertices[rindices[j * 3 + 0]]);
+			Vector3 p1 = p_transform.xform(rvertices[rindices[j * 3 + 1]]);
+			Vector3 p2 = p_transform.xform(rvertices[rindices[j * 3 + 2]]);
+
+			if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
+				continue;
+			}
+
+			r_indices.push_back(vertex_ofs + rindices[j * 3 + 0]);
+			r_indices.push_back(vertex_ofs + rindices[j * 3 + 1]);
+			r_indices.push_back(vertex_ofs + rindices[j * 3 + 2]);
+		}
+	}
+}
+
+// Adds vertex p_vertex of p_surface to p_st with lightmap UV p_uv2.
+static void _lightmap_unwrap_add_vertex(const ArrayMeshLightmapSurface &p_surface, int p_vertex, const Vector2 &p_uv2, const Ref<SurfaceTool> &p_st) {
+	const SurfaceTool::Vertex &v = p_surface.vertices[p_vertex];
+
+	if (p_surface.format & Mesh::ARRAY_FORMAT_COLOR) {
+		p_st->set_color(v.color);
+	}
+	if (p_surface.format & Mesh::ARRAY_FORMAT_TEX_UV) {
+		p_st->set_uv(v.uv);
+	}
+	if (p_surface.format & Mesh::ARRAY_FORMAT_NORMAL) {
+		p_st->set_normal(v.normal);
+	}
+	if (p_surface.format & Mesh::ARRAY_FORMAT_TANGENT) {
+		Plane t;
+		t.normal = v.tangent;
+		t.d = v.binormal.dot(v.normal.cross(v.tangent)) < 0 ? -1 : 1;
+		p_st->set_tangent(t);
+	}
+	if (p_surface.format & Mesh::ARRAY_FORMAT_BONES) {
+		p_st->set_bones(v.bones);
+	}
+	if (p_surface.format & Mesh::ARRAY_FORMAT_WEIGHTS) {
+		p_st->set_weights(v.weights);
+	}
+
+	p_st->set_uv2(p_uv2);
+	p_st->add_vertex(v.vertex);
+}
+// </ELIM>
+
 Error ArrayMesh::lightmap_unwrap(const Transform3D &p_base_transform, float p_texel_size) {
 	Vector<uint8_t> null_cache;
 	return lightmap_unwrap_cached(p_base_transform, p_texel_size, null_cache, null_cache, false);
@@ -2112,66 +2211,69 @@ Error ArrayMesh::lightmap_unwrap_cached(const Transform3D &p_base_transform, flo
 
 		Array arrays = surface_get_arrays(i);
 		s.material = surface_get_material(i);
-		SurfaceTool::create_vertex_array_from_arrays(arrays, s.vertices, &s.format);
+		// <ELIM> Shared with lightmap_unwrap_surfaces.
+		// SurfaceTool::create_vertex_array_from_arrays(arrays, s.vertices, &s.format);
 
-		PackedVector3Array rvertices = arrays[Mesh::ARRAY_VERTEX];
-		int vc = rvertices.size();
+		// PackedVector3Array rvertices = arrays[Mesh::ARRAY_VERTEX];
+		// int vc = rvertices.size();
 
-		PackedVector3Array rnormals = arrays[Mesh::ARRAY_NORMAL];
+		// PackedVector3Array rnormals = arrays[Mesh::ARRAY_NORMAL];
 
-		int vertex_ofs = vertices.size() / 3;
+		// int vertex_ofs = vertices.size() / 3;
 
-		vertices.resize((vertex_ofs + vc) * 3);
-		normals.resize((vertex_ofs + vc) * 3);
-		uv_indices.resize(vertex_ofs + vc);
+		// vertices.resize((vertex_ofs + vc) * 3);
+		// normals.resize((vertex_ofs + vc) * 3);
+		// uv_indices.resize(vertex_ofs + vc);
 
-		for (int j = 0; j < vc; j++) {
-			Vector3 v = transform.xform(rvertices[j]);
-			Vector3 n = normal_basis.xform(rnormals[j]).normalized();
+		// for (int j = 0; j < vc; j++) {
+			// Vector3 v = transform.xform(rvertices[j]);
+			// Vector3 n = normal_basis.xform(rnormals[j]).normalized();
 
-			vertices[(j + vertex_ofs) * 3 + 0] = v.x;
-			vertices[(j + vertex_ofs) * 3 + 1] = v.y;
-			vertices[(j + vertex_ofs) * 3 + 2] = v.z;
-			normals[(j + vertex_ofs) * 3 + 0] = n.x;
-			normals[(j + vertex_ofs) * 3 + 1] = n.y;
-			normals[(j + vertex_ofs) * 3 + 2] = n.z;
-			uv_indices[j + vertex_ofs] = Pair<int, int>(i, j);
-		}
+			// vertices[(j + vertex_ofs) * 3 + 0] = v.x;
+			// vertices[(j + vertex_ofs) * 3 + 1] = v.y;
+			// vertices[(j + vertex_ofs) * 3 + 2] = v.z;
+			// normals[(j + vertex_ofs) * 3 + 0] = n.x;
+			// normals[(j + vertex_ofs) * 3 + 1] = n.y;
+			// normals[(j + vertex_ofs) * 3 + 2] = n.z;
+			// uv_indices[j + vertex_ofs] = Pair<int, int>(i, j);
+		// }
 
-		PackedInt32Array rindices = arrays[Mesh::ARRAY_INDEX];
-		int ic = rindices.size();
+		// PackedInt32Array rindices = arrays[Mesh::ARRAY_INDEX];
+		// int ic = rindices.size();
 
-		float eps = 1.19209290e-7F; // Taken from xatlas.h
-		if (ic == 0) {
-			for (int j = 0; j < vc / 3; j++) {
-				Vector3 p0 = transform.xform(rvertices[j * 3 + 0]);
-				Vector3 p1 = transform.xform(rvertices[j * 3 + 1]);
-				Vector3 p2 = transform.xform(rvertices[j * 3 + 2]);
+		// float eps = 1.19209290e-7F; // Taken from xatlas.h
+		// if (ic == 0) {
+			// for (int j = 0; j < vc / 3; j++) {
+				// Vector3 p0 = transform.xform(rvertices[j * 3 + 0]);
+				// Vector3 p1 = transform.xform(rvertices[j * 3 + 1]);
+				// Vector3 p2 = transform.xform(rvertices[j * 3 + 2]);
 
-				if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
-					continue;
-				}
+				// if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
+					// continue;
+				// }
 
-				indices.push_back(vertex_ofs + j * 3 + 0);
-				indices.push_back(vertex_ofs + j * 3 + 1);
-				indices.push_back(vertex_ofs + j * 3 + 2);
-			}
+				// indices.push_back(vertex_ofs + j * 3 + 0);
+				// indices.push_back(vertex_ofs + j * 3 + 1);
+				// indices.push_back(vertex_ofs + j * 3 + 2);
+			// }
 
-		} else {
-			for (int j = 0; j < ic / 3; j++) {
-				Vector3 p0 = transform.xform(rvertices[rindices[j * 3 + 0]]);
-				Vector3 p1 = transform.xform(rvertices[rindices[j * 3 + 1]]);
-				Vector3 p2 = transform.xform(rvertices[rindices[j * 3 + 2]]);
+		// } else {
+			// for (int j = 0; j < ic / 3; j++) {
+				// Vector3 p0 = transform.xform(rvertices[rindices[j * 3 + 0]]);
+				// Vector3 p1 = transform.xform(rvertices[rindices[j * 3 + 1]]);
+				// Vector3 p2 = transform.xform(rvertices[rindices[j * 3 + 2]]);
 
-				if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
-					continue;
-				}
+				// if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
+					// continue;
+				// }
 
-				indices.push_back(vertex_ofs + rindices[j * 3 + 0]);
-				indices.push_back(vertex_ofs + rindices[j * 3 + 1]);
-				indices.push_back(vertex_ofs + rindices[j * 3 + 2]);
-			}
-		}
+				// indices.push_back(vertex_ofs + rindices[j * 3 + 0]);
+				// indices.push_back(vertex_ofs + rindices[j * 3 + 1]);
+				// indices.push_back(vertex_ofs + rindices[j * 3 + 2]);
+			// }
+		// }
+		_lightmap_unwrap_add_surface(arrays, i, transform, normal_basis, s, vertices, normals, indices, uv_indices);
+		// </ELIM>
 
 		lightmap_surfaces.push_back(s);
 	}
@@ -2220,36 +2322,42 @@ Error ArrayMesh::lightmap_unwrap_cached(const Transform3D &p_base_transform, flo
 
 		int surface = uv_indices[gen_vertices[gen_indices[i + 0]]].first;
 
+		// <ELIM> Shared with lightmap_unwrap_surfaces.
+		// for (int j = 0; j < 3; j++) {
+			// SurfaceTool::Vertex v = lightmap_surfaces[surface].vertices[uv_indices[gen_vertices[gen_indices[i + j]]].second];
+
+			// if (lightmap_surfaces[surface].format & ARRAY_FORMAT_COLOR) {
+				// surfaces_tools[surface]->set_color(v.color);
+			// }
+			// if (lightmap_surfaces[surface].format & ARRAY_FORMAT_TEX_UV) {
+				// surfaces_tools[surface]->set_uv(v.uv);
+			// }
+			// if (lightmap_surfaces[surface].format & ARRAY_FORMAT_NORMAL) {
+				// surfaces_tools[surface]->set_normal(v.normal);
+			// }
+			// if (lightmap_surfaces[surface].format & ARRAY_FORMAT_TANGENT) {
+				// Plane t;
+				// t.normal = v.tangent;
+				// t.d = v.binormal.dot(v.normal.cross(v.tangent)) < 0 ? -1 : 1;
+				// surfaces_tools[surface]->set_tangent(t);
+			// }
+			// if (lightmap_surfaces[surface].format & ARRAY_FORMAT_BONES) {
+				// surfaces_tools[surface]->set_bones(v.bones);
+			// }
+			// if (lightmap_surfaces[surface].format & ARRAY_FORMAT_WEIGHTS) {
+				// surfaces_tools[surface]->set_weights(v.weights);
+			// }
+
+			// Vector2 uv2(gen_uvs[gen_indices[i + j] * 2 + 0], gen_uvs[gen_indices[i + j] * 2 + 1]);
+			// surfaces_tools[surface]->set_uv2(uv2);
+
+			// surfaces_tools[surface]->add_vertex(v.vertex);
+		// }
 		for (int j = 0; j < 3; j++) {
-			SurfaceTool::Vertex v = lightmap_surfaces[surface].vertices[uv_indices[gen_vertices[gen_indices[i + j]]].second];
-
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_COLOR) {
-				surfaces_tools[surface]->set_color(v.color);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_TEX_UV) {
-				surfaces_tools[surface]->set_uv(v.uv);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_NORMAL) {
-				surfaces_tools[surface]->set_normal(v.normal);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_TANGENT) {
-				Plane t;
-				t.normal = v.tangent;
-				t.d = v.binormal.dot(v.normal.cross(v.tangent)) < 0 ? -1 : 1;
-				surfaces_tools[surface]->set_tangent(t);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_BONES) {
-				surfaces_tools[surface]->set_bones(v.bones);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_WEIGHTS) {
-				surfaces_tools[surface]->set_weights(v.weights);
-			}
-
-			Vector2 uv2(gen_uvs[gen_indices[i + j] * 2 + 0], gen_uvs[gen_indices[i + j] * 2 + 1]);
-			surfaces_tools[surface]->set_uv2(uv2);
-
-			surfaces_tools[surface]->add_vertex(v.vertex);
+			const Vector2 uv2(gen_uvs[gen_indices[i + j] * 2 + 0], gen_uvs[gen_indices[i + j] * 2 + 1]);
+			_lightmap_unwrap_add_vertex(lightmap_surfaces[surface], uv_indices[gen_vertices[gen_indices[i + j]]].second, uv2, surfaces_tools[surface]);
 		}
+		// </ELIM>
 	}
 
 	//generate surfaces
@@ -2319,66 +2427,7 @@ Dictionary ArrayMesh::lightmap_unwrap_surfaces(const TypedArray<Array> &p_surfac
 		s.format = sd.format;
 		ERR_FAIL_COND_V_MSG(!(s.format & ARRAY_FORMAT_NORMAL), Dictionary(), "Normals are required for lightmap unwrap.");
 
-		SurfaceTool::create_vertex_array_from_arrays(arrays, s.vertices, &s.format);
-
-		PackedVector3Array rvertices = arrays[Mesh::ARRAY_VERTEX];
-		int vc = rvertices.size();
-
-		PackedVector3Array rnormals = arrays[Mesh::ARRAY_NORMAL];
-
-		int vertex_ofs = vertices.size() / 3;
-
-		vertices.resize((vertex_ofs + vc) * 3);
-		normals.resize((vertex_ofs + vc) * 3);
-		uv_indices.resize(vertex_ofs + vc);
-
-		for (int j = 0; j < vc; j++) {
-			Vector3 v = transform.xform(rvertices[j]);
-			Vector3 n = normal_basis.xform(rnormals[j]).normalized();
-
-			vertices[(j + vertex_ofs) * 3 + 0] = v.x;
-			vertices[(j + vertex_ofs) * 3 + 1] = v.y;
-			vertices[(j + vertex_ofs) * 3 + 2] = v.z;
-			normals[(j + vertex_ofs) * 3 + 0] = n.x;
-			normals[(j + vertex_ofs) * 3 + 1] = n.y;
-			normals[(j + vertex_ofs) * 3 + 2] = n.z;
-			uv_indices[j + vertex_ofs] = Pair<int, int>(i, j);
-		}
-
-		PackedInt32Array rindices = arrays[Mesh::ARRAY_INDEX];
-		int ic = rindices.size();
-
-		float eps = 1.19209290e-7F; // Taken from xatlas.h
-		if (ic == 0) {
-			for (int j = 0; j < vc / 3; j++) {
-				Vector3 p0 = transform.xform(rvertices[j * 3 + 0]);
-				Vector3 p1 = transform.xform(rvertices[j * 3 + 1]);
-				Vector3 p2 = transform.xform(rvertices[j * 3 + 2]);
-
-				if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
-					continue;
-				}
-
-				indices.push_back(vertex_ofs + j * 3 + 0);
-				indices.push_back(vertex_ofs + j * 3 + 1);
-				indices.push_back(vertex_ofs + j * 3 + 2);
-			}
-
-		} else {
-			for (int j = 0; j < ic / 3; j++) {
-				Vector3 p0 = transform.xform(rvertices[rindices[j * 3 + 0]]);
-				Vector3 p1 = transform.xform(rvertices[rindices[j * 3 + 1]]);
-				Vector3 p2 = transform.xform(rvertices[rindices[j * 3 + 2]]);
-
-				if ((p0 - p1).length_squared() < eps || (p1 - p2).length_squared() < eps || (p2 - p0).length_squared() < eps) {
-					continue;
-				}
-
-				indices.push_back(vertex_ofs + rindices[j * 3 + 0]);
-				indices.push_back(vertex_ofs + rindices[j * 3 + 1]);
-				indices.push_back(vertex_ofs + rindices[j * 3 + 2]);
-			}
-		}
+		_lightmap_unwrap_add_surface(arrays, i, transform, normal_basis, s, vertices, normals, indices, uv_indices);
 
 		lightmap_surfaces.push_back(s);
 	}
@@ -2425,34 +2474,8 @@ Dictionary ArrayMesh::lightmap_unwrap_surfaces(const TypedArray<Array> &p_surfac
 		surface_triangles[surface]++;
 
 		for (int j = 0; j < 3; j++) {
-			SurfaceTool::Vertex v = lightmap_surfaces[surface].vertices[uv_indices[gen_vertices[gen_indices[i + j]]].second];
-
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_COLOR) {
-				surfaces_tools[surface]->set_color(v.color);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_TEX_UV) {
-				surfaces_tools[surface]->set_uv(v.uv);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_NORMAL) {
-				surfaces_tools[surface]->set_normal(v.normal);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_TANGENT) {
-				Plane t;
-				t.normal = v.tangent;
-				t.d = v.binormal.dot(v.normal.cross(v.tangent)) < 0 ? -1 : 1;
-				surfaces_tools[surface]->set_tangent(t);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_BONES) {
-				surfaces_tools[surface]->set_bones(v.bones);
-			}
-			if (lightmap_surfaces[surface].format & ARRAY_FORMAT_WEIGHTS) {
-				surfaces_tools[surface]->set_weights(v.weights);
-			}
-
-			Vector2 uv2(gen_uvs[gen_indices[i + j] * 2 + 0], gen_uvs[gen_indices[i + j] * 2 + 1]);
-			surfaces_tools[surface]->set_uv2(uv2);
-
-			surfaces_tools[surface]->add_vertex(v.vertex);
+			const Vector2 uv2(gen_uvs[gen_indices[i + j] * 2 + 0], gen_uvs[gen_indices[i + j] * 2 + 1]);
+			_lightmap_unwrap_add_vertex(lightmap_surfaces[surface], uv_indices[gen_vertices[gen_indices[i + j]]].second, uv2, surfaces_tools[surface]);
 		}
 	}
 
