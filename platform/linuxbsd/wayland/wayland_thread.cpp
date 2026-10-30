@@ -2612,12 +2612,18 @@ void WaylandThread::_wp_relative_pointer_on_relative_motion(void *data, struct z
 		const Vector2 raw_motion(wl_fixed_to_double(dx_unaccel), wl_fixed_to_double(dy_unaccel));
 		pd.relative_motion += raw_motion;
 
-		// Event times are CLOCK_MONOTONIC; the engine's ticks may not be, so only the event's age carries over.
+		// Compositors stamp CLOCK_MONOTONIC, but the protocol leaves the base undefined,
+		// so an implausible age is treated as now. The engine's ticks may not be
+		// CLOCK_MONOTONIC either, so only the event's age carries over.
+		const uint64_t MAX_EVENT_AGE_USEC = 100000;
 		struct timespec now = {};
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		const uint64_t now_usec = uint64_t(now.tv_sec) * 1000000 + uint64_t(now.tv_nsec) / 1000;
 		const uint64_t event_usec = (uint64_t(uptime_hi) << 32) | uptime_lo;
-		const uint64_t age_usec = now_usec > event_usec ? now_usec - event_usec : 0;
+		uint64_t age_usec = now_usec > event_usec ? now_usec - event_usec : 0;
+		if (age_usec > MAX_EVENT_AGE_USEC) {
+			age_usec = 0;
+		}
 		const uint64_t ticks_usec = OS::get_singleton()->get_ticks_usec();
 		Input::get_singleton()->push_mouse_motion_sample(ticks_usec - MIN(age_usec, ticks_usec), raw_motion);
 	} else {
@@ -4915,8 +4921,9 @@ Error WaylandThread::init() {
 	}
 #endif // DBUS_ENABLED
 
-	// <ELIM> Captured mouse motion samples come from relative pointer events with their own time
-	Input::get_singleton()->set_mouse_motion_sampled_by_platform(registry.wp_relative_pointer_manager != nullptr);
+	// <ELIM> Captured mouse motion samples come from relative pointer events with their own time.
+	// They are only pushed while the pointer is locked, which needs pointer constraints too.
+	Input::get_singleton()->set_mouse_motion_sampled_by_platform(registry.wp_relative_pointer_manager != nullptr && registry.wp_pointer_constraints != nullptr);
 	// </ELIM>
 
 	if (!registry.wp_fifo_manager_name) {
