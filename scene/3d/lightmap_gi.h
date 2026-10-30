@@ -31,6 +31,9 @@
 #pragma once
 
 #include "core/templates/local_vector.h"
+// <ELIM>
+#include "core/os/mutex.h"
+// </ELIM>
 #include "scene/3d/light_3d.h"
 #include "scene/3d/lightmapper.h"
 #include "scene/3d/visual_instance_3d.h"
@@ -64,13 +67,6 @@ private:
 	bool interior = false;
 
 	bool _uses_packed_directional = false;
-
-	// <ELIM> Emitter islands the bake integrated as area lights, one Dictionary each
-	// (position/normal in the LightmapGI frame, linear color, energy, area, radius).
-	// The runtime stands a specular-only proxy light per island from this list. See
-	// claude-docs/EMITTER_SPECULAR_LIGHTS.md.
-	Array surface_lights;
-	// </ELIM>
 
 	// <ELIM> The shadowmask textures hold emitter-arc layer pairs (Lightmapper::
 	// get_emitter_arcs); stored. emitter_specular is the runtime switch for shading
@@ -148,8 +144,6 @@ public:
 	AABB get_capture_bounds() const;
 
 	// <ELIM>
-	void set_surface_lights(const Array &p_lights);
-	Array get_surface_lights() const;
 	void set_emitter_arcs(bool p_enable);
 	bool has_emitter_arcs() const;
 	void set_emitter_specular(bool p_enable);
@@ -256,10 +250,44 @@ private:
 		Basis environment_transform;
 		float exposure_normalization = 1.0;
 		Lightmapper::BakeError gpu_err = Lightmapper::BAKE_OK;
-		// Emitter islands collected by prepare, written to the LightmapGIData by finalize.
-		Array surface_lights;
+
+		// Node properties the gpu and finalize phases read, copied by prepare so a
+		// property set while bake_gpu runs on a worker cannot race it.
+		BakeQuality quality = BAKE_QUALITY_MEDIUM;
+		bool use_denoiser = true;
+		float denoiser_strength = 0.1f;
+		int denoiser_range = 10;
+		int bounces = 3;
+		float bounce_indirect_energy = 1.0;
+		float bounce_saturation = 1.0;
+		float bias = 0.0005;
+		int max_texture_size = 16384;
+		float supersampling_factor = 1.0;
+		bool directional = false;
+		bool interior = false;
+		bool use_texture_for_bounces = true;
+		LightmapGIData::ShadowmaskMode shadowmask_mode = LightmapGIData::SHADOWMASK_MODE_NONE;
+		GenerateProbes gen_probes = GENERATE_PROBES_SUBDIV_8;
+
+		// Ownership handoff between bake_gpu's worker and the main thread. While
+		// gpu_running, an abort only sets abandoned and detaches the state; the
+		// worker then cancels at its next progress step and frees it.
+		Mutex mutex;
+		bool gpu_running = false;
+		bool abandoned = false;
 	};
 	BakeState *pending_bake = nullptr;
+	Mutex pending_bake_mutex;
+
+	struct GpuStepUD {
+		BakeState *state = nullptr;
+		Lightmapper::BakeStepFunc func = nullptr;
+		void *ud = nullptr;
+	};
+	static bool _bake_gpu_step(float p_completion, const String &p_text, void *p_ud, bool p_refresh);
+	static BakeError _map_lightmapper_error(Lightmapper::BakeError p_error);
+	void _snapshot_bake_params(BakeState &r_state) const;
+	void _release_pending_bake();
 	// </ELIM>
 
 	struct LightsFound {
@@ -329,11 +357,13 @@ private:
 	BakeError _save_and_reimport_atlas_textures(const Ref<Lightmapper> p_lightmapper, const String &p_base_name, TypedArray<TextureLayered> &r_textures, bool p_is_shadowmask = false) const;
 	// <ELIM>
 	Ref<TextureLayered> _pack_sky_visibility(const Ref<Lightmapper> &p_lightmapper) const;
+	Ref<Image> _downsample_slice(const Ref<Image> &p_slice) const;
 	// </ELIM>
 
 	// <ELIM> The three phases bake() is split into (see BakeState above).
 	BakeError _bake_prepare_internal(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata, BakeState &r_state);
-	void _bake_gpu_internal(BakeState &p_state, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata);
+	// Static: once running, the worker must not touch the node.
+	static void _bake_gpu_internal(BakeState &p_state, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata);
 	BakeError _bake_finalize_internal(BakeState &p_state, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata);
 	// </ELIM>
 

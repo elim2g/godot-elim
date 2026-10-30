@@ -295,14 +295,6 @@ void LightmapGIData::_set_probe_data(const Dictionary &p_data) {
 }
 
 // <ELIM>
-void LightmapGIData::set_surface_lights(const Array &p_lights) {
-	surface_lights = p_lights;
-}
-
-Array LightmapGIData::get_surface_lights() const {
-	return surface_lights;
-}
-
 void LightmapGIData::_update_emitter_arcs() {
 	RS::get_singleton()->lightmap_set_emitter_arcs(lightmap, emitter_arcs, emitter_specular);
 }
@@ -400,8 +392,6 @@ void LightmapGIData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_set_probe_data", "data"), &LightmapGIData::_set_probe_data);
 	ClassDB::bind_method(D_METHOD("_get_probe_data"), &LightmapGIData::_get_probe_data);
 	// <ELIM>
-	ClassDB::bind_method(D_METHOD("set_surface_lights", "lights"), &LightmapGIData::set_surface_lights);
-	ClassDB::bind_method(D_METHOD("get_surface_lights"), &LightmapGIData::get_surface_lights);
 	ClassDB::bind_method(D_METHOD("set_emitter_arcs", "enable"), &LightmapGIData::set_emitter_arcs);
 	ClassDB::bind_method(D_METHOD("has_emitter_arcs"), &LightmapGIData::has_emitter_arcs);
 	ClassDB::bind_method(D_METHOD("set_emitter_specular", "enable"), &LightmapGIData::set_emitter_specular);
@@ -416,7 +406,6 @@ void LightmapGIData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "user_data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_user_data", "_get_user_data");
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "probe_data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_probe_data", "_get_probe_data");
 	// <ELIM>
-	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "surface_lights", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_surface_lights", "get_surface_lights");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "emitter_arcs", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_emitter_arcs", "has_emitter_arcs");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "emitter_specular", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_emitter_specular", "is_emitter_specular_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "sky_visibility_texture", PROPERTY_HINT_RESOURCE_TYPE, "TextureLayered", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_sky_visibility_texture", "get_sky_visibility_texture");
@@ -570,11 +559,7 @@ void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &m
 
 	Light3D *light = Object::cast_to<Light3D>(p_at_node);
 
-	// <ELIM> A BAKE_STATIC_SPECULAR proxy stands in for an emitter island the bake
-	// already integrates analytically; gathering it would bake the emitter twice.
-	// if (light && light->get_bake_mode() != Light3D::BAKE_DISABLED) {
-	if (light && light->get_bake_mode() != Light3D::BAKE_DISABLED && light->get_bake_mode() != Light3D::BAKE_STATIC_SPECULAR) {
-	// </ELIM>
+	if (light && light->get_bake_mode() != Light3D::BAKE_DISABLED) {
 		LightsFound lf;
 		lf.xform = get_global_transform().affine_inverse() * light->get_global_transform();
 		lf.light = light;
@@ -949,17 +934,23 @@ Ref<TextureLayered> LightmapGI::_pack_sky_visibility(const Ref<Lightmapper> &p_l
 	for (int i = 0; i < count; i++) {
 		Ref<Image> slice = p_lightmapper->get_sky_visibility_texture(i);
 		ERR_FAIL_COND_V(slice.is_null(), Ref<TextureLayered>());
-		if (supersampling_enabled) {
-			slice = slice->duplicate();
-			slice->resize(slice->get_width() / supersampling_factor, slice->get_height() / supersampling_factor, Image::INTERPOLATE_TRILINEAR);
-		}
-		slices.push_back(slice);
+		slices.push_back(_downsample_slice(slice));
 	}
 
 	Ref<Texture2DArray> texture;
 	texture.instantiate();
 	ERR_FAIL_COND_V(texture->create_from_images(slices) != OK, Ref<TextureLayered>());
 	return texture;
+}
+
+// A slice at output resolution: the bake renders supersampled.
+Ref<Image> LightmapGI::_downsample_slice(const Ref<Image> &p_slice) const {
+	if (!supersampling_enabled) {
+		return p_slice;
+	}
+	Ref<Image> slice = p_slice->duplicate();
+	slice->resize(slice->get_width() / supersampling_factor, slice->get_height() / supersampling_factor, Image::INTERPOLATE_TRILINEAR);
+	return slice;
 }
 // </ELIM>
 
@@ -978,12 +969,7 @@ LightmapGI::BakeError LightmapGI::_save_and_reimport_atlas_textures(const Ref<Li
 	if (!Engine::get_singleton()->is_editor_hint()) {
 		Vector<Ref<Image>> slices;
 		for (int i = 0; i < images.size(); i++) {
-			Ref<Image> slice = images[i];
-			if (supersampling_enabled) {
-				slice = slice->duplicate();
-				slice->resize(slice->get_width() / supersampling_factor, slice->get_height() / supersampling_factor, Image::INTERPOLATE_TRILINEAR);
-			}
-			slices.push_back(slice);
+			slices.push_back(_downsample_slice(images[i]));
 		}
 		Ref<Texture2DArray> runtime_texture;
 		runtime_texture.instantiate();
@@ -1087,17 +1073,12 @@ static constexpr float SURFACE_LIGHT_MIN_AREA = 1e-4f; // Degenerate-sliver isla
 // Per-island triangle cap, applied to the island's SIMPLIFIED polygon (see
 // _surface_light_simplify_island) — not to the importer's raw fragment count.
 // Convex islands collapse to a hull fan of a handful of triangles; a non-convex
-// island is rebuilt from its boundary, which strips the T-junction slivers that
-// used to dominate the count. Past the cap an island still falls back to its
-// hull fan with radiance scaled by island_area/hull_area: power-conserving but
-// geometrically smeared, which for a concave emitter means light leaking onto
-// geometry that is not emissive AND the real emitter dimmed by the same ratio.
-// That fallback is a last resort for a pathological island, never the routine
-// outcome, so the cap sits far above any real face: the analytic edge sum is a
-// few dozen flops per triangle, and the direct pass already charges each area
-// light a full soft-shadow ray budget it does not spend (it fires
-// surface_light_visibility_rays, typically 16), plus an explicit per-triangle
-// term in the batcher's cost model.
+// island is rebuilt from its boundary, which strips the T-junction slivers.
+// Past the cap an island falls back to its hull fan with radiance scaled by
+// island_area/hull_area: power-conserving but smeared, so a concave emitter
+// leaks onto non-emissive geometry and dims. The cap sits far above any real
+// face because the edge sum costs a few dozen flops per triangle and the
+// batcher's cost model charges each triangle explicitly.
 static constexpr uint32_t SURFACE_LIGHT_MAX_POLY_TRIS = 1024;
 // Global polygon-vertex backstop against a pathological/misconfigured map
 // (e.g. a texture accidentally flagged emissive across the whole level)
@@ -1113,12 +1094,8 @@ static constexpr float SURFACE_LIGHT_HULL_TOLERANCE = 1.01f;
 // emitter of radiance L is πL; energies are authored as radiance).
 static constexpr float SURFACE_LIGHT_ENERGY_SCALE = 1.0f / (float)Math::PI;
 // Range-cull contribution threshold: the derived range solves the unshadowed
-// peak contribution E·A/d² = CUTOFF. With one light per island (not one per
-// patch), per-texel cost is bounded by island count × visibility rays, so the
-// range no longer needs to be artificially local the way the old per-patch
-// scheme did (its 0.04 cutoff + 40 m clamp existed purely because patches-in-
-// range multiplied into the TDR cliff) — a large emitter legitimately reaches
-// far.
+// peak contribution E·A/d² = CUTOFF. Per-texel cost is bounded by island count
+// × visibility rays, so a large emitter may legitimately reach far.
 static constexpr float SURFACE_LIGHT_CUTOFF = 0.005f;
 static constexpr float SURFACE_LIGHT_RANGE_MAX = 512.0f;
 // <ELIM> Coplanar-contact occlusion is an AREA fraction over an island's member
@@ -1196,11 +1173,40 @@ struct SurfaceLightIslandLight {
 // frame: the bake passes lightmapper-relative transforms (patches land where the
 // bake integrates them); the debug hook passes world transforms (patches land at
 // live world coordinates). overrides are the per-surface override materials.
+struct SurfaceLightSurfaceArrays {
+	Vector<Vector3> vertices;
+	Vector<Vector3> normals;
+	Vector<int> index;
+};
+
 struct SurfaceLightMeshInput {
 	Ref<Mesh> mesh;
 	Transform3D xform;
 	Vector<Ref<Material>> overrides;
+	// Arrays the caller already fetched, by surface index. Missing or empty
+	// entries are fetched by the collector (each fetch is a GPU readback).
+	LocalVector<SurfaceLightSurfaceArrays> surfaces;
 };
+
+// Bake flags of a surface's effective (override-preferred) material; the values
+// are LightmapperRD::SURFACE_FLAG_SKY and SURFACE_FLAG_SURFACE_LIGHT.
+static constexpr uint32_t SURFACE_BAKE_FLAG_SKY = 1u;
+static constexpr uint32_t SURFACE_BAKE_FLAG_SURFACE_LIGHT = 4u;
+
+static uint32_t _surface_bake_flags(const Ref<Material> &p_material) {
+	if (p_material.is_null()) {
+		return 0;
+	}
+	uint32_t flags = 0;
+	if (bool(p_material->get_meta(SNAME("tnt_sky"), false))) {
+		flags |= SURFACE_BAKE_FLAG_SKY;
+	}
+	const Ref<BaseMaterial3D> bm = p_material;
+	if (bool(p_material->get_meta(SNAME("tnt_surface_light"), false)) && bm.is_valid() && bm->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
+		flags |= SURFACE_BAKE_FLAG_SURFACE_LIGHT;
+	}
+	return flags;
+}
 
 // Quantized world vertex + undirected edge key for triangle-adjacency matching.
 // Snapping to SURFACE_LIGHT_WELD_EPS makes coincident (already-welded) verts hash
@@ -1899,25 +1905,31 @@ static void _collect_surface_light_patches(const Vector<SurfaceLightMeshInput> &
 			// environment: they neither emit nor occlude, so skip them entirely.
 			Ref<Material> mat = in.mesh->surface_get_material(i);
 			Ref<Material> eff_mat = (i < in.overrides.size() && in.overrides[i].is_valid()) ? in.overrides[i] : mat;
-			if (eff_mat.is_valid() && bool(eff_mat->get_meta(SNAME("tnt_sky"), false))) {
+			const uint32_t bake_flags = _surface_bake_flags(eff_mat);
+			if (bake_flags & SURFACE_BAKE_FLAG_SKY) {
 				continue;
 			}
-			// Emitter detection, identical to the bake mesh loop: the material carries the
-			// tnt_surface_light meta and the emission feature. Everything else that is not
-			// sky is a solid occluder.
-			Ref<BaseMaterial3D> bm = eff_mat;
-			const bool is_emitter = eff_mat.is_valid() && bool(eff_mat->get_meta(SNAME("tnt_surface_light"), false)) &&
-					bm.is_valid() && bm->get_feature(BaseMaterial3D::FEATURE_EMISSION);
+			// Everything that is neither sky nor an emitter is a solid occluder.
+			const bool is_emitter = (bake_flags & SURFACE_BAKE_FLAG_SURFACE_LIGHT) != 0;
 
 			// Positions + vertex normals feed both paths (the emitter merge and the solid
 			// occluder index), so fetch them once, then branch.
-			Array a = in.mesh->surface_get_arrays(i);
-			Vector<Vector3> vertices = a[Mesh::ARRAY_VERTEX];
-			Vector<Vector3> normals = a[Mesh::ARRAY_NORMAL];
+			Vector<Vector3> vertices;
+			Vector<Vector3> normals;
+			Vector<int> index;
+			if (i < (int)in.surfaces.size() && !in.surfaces[i].vertices.is_empty()) {
+				vertices = in.surfaces[i].vertices;
+				normals = in.surfaces[i].normals;
+				index = in.surfaces[i].index;
+			} else {
+				Array a = in.mesh->surface_get_arrays(i);
+				vertices = a[Mesh::ARRAY_VERTEX];
+				normals = a[Mesh::ARRAY_NORMAL];
+				index = a[Mesh::ARRAY_INDEX];
+			}
 			if (vertices.is_empty() || normals.is_empty()) {
 				continue;
 			}
-			Vector<int> index = a[Mesh::ARRAY_INDEX];
 			const Vector3 *vr = vertices.ptr();
 			const Vector3 *nr = normals.ptr();
 			const int *ir = index.size() ? index.ptr() : nullptr;
@@ -2343,6 +2355,11 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 		}
 		// create mesh data for insert
 
+		// <ELIM> Surface arrays fetched below, reused by the surface-light collector.
+		LocalVector<LocalVector<SurfaceLightSurfaceArrays>> sl_surface_arrays;
+		sl_surface_arrays.resize(meshes_found.size());
+		// </ELIM>
+
 		//get the base material textures, help compute atlas size and bounds
 		for (int m_i = 0; m_i < meshes_found.size(); m_i++) {
 			if (p_bake_step) {
@@ -2449,31 +2466,13 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 					mat_rid = mat->get_rid();
 				}
 
-				// <ELIM> Detect Q3-style sky faces + surface lights from the EFFECTIVE
-				// material (TURNT assigns via surface override) to set the per-triangle
-				// surface_flags: SKY pass-through, and the SURFACE_LIGHT double-count
-				// guard (the bounce pass skips these triangles' rasterized emission).
-				// The area-light PATCHES themselves are generated after the mesh loop by
-				// _collect_surface_light_patches (shared with the debug hook).
-				// was: this block also set is_surface_light / surface_light_color /
-				// surface_light_energy and declared surface_patch_base / surface_light_cap_hit
-				// / a per-surface `LocalVector<SurfaceLightTri> surface_light_tris` for INLINE
-				// patch generation — all moved to the helper. The surface_flags computation
-				// below (the only part the bake mesh data needs) is unchanged. (Fork-only; the
-				// upstream mesh loop has no such detection.)
-				int32_t surface_flags = 0;
-				{
-					Ref<Material> eff_mat = (i < mf.overrides.size() && mf.overrides[i].is_valid()) ? mf.overrides[i] : mat;
-					if (eff_mat.is_valid() && bool(eff_mat->get_meta(SNAME("tnt_sky"), false))) {
-						surface_flags |= 1;
-					}
-					if (eff_mat.is_valid() && bool(eff_mat->get_meta(SNAME("tnt_surface_light"), false))) {
-						Ref<BaseMaterial3D> bm = eff_mat;
-						if (bm.is_valid() && bm->get_feature(BaseMaterial3D::FEATURE_EMISSION)) {
-							surface_flags |= 4; // LightmapperRD::SURFACE_FLAG_SURFACE_LIGHT
-						}
-					}
-				}
+				// <ELIM> Per-triangle surface_flags from the EFFECTIVE material (TURNT
+				// assigns via surface override): SKY pass-through, and the SURFACE_LIGHT
+				// double-count guard (the bounce pass skips these triangles' rasterized
+				// emission). The area lights themselves come from
+				// _collect_surface_light_patches after the mesh loop.
+				const Ref<Material> eff_mat = (i < mf.overrides.size() && mf.overrides[i].is_valid()) ? mf.overrides[i] : mat;
+				const int32_t surface_flags = (int32_t)_surface_bake_flags(eff_mat);
 				// </ELIM>
 
 				Vector<Vector3> vertices = a[Mesh::ARRAY_VERTEX];
@@ -2483,6 +2482,19 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 				Vector<Vector3> normals = a[Mesh::ARRAY_NORMAL];
 				const Vector3 *nr = nullptr;
 				Vector<int> index = a[Mesh::ARRAY_INDEX];
+
+				// <ELIM> Kept for the surface-light collector, which would otherwise
+				// read the same arrays back again.
+				{
+					LocalVector<SurfaceLightSurfaceArrays> &kept = sl_surface_arrays[m_i];
+					if (kept.is_empty()) {
+						kept.resize(mf.mesh->get_surface_count());
+					}
+					kept[i].vertices = vertices;
+					kept[i].normals = normals;
+					kept[i].index = index;
+				}
+				// </ELIM>
 
 				// <ELIM> Trace-only meshes carry no UV2 (they own no atlas). Tolerate
 				// its absence and push dummy uv2 below so array lengths stay aligned;
@@ -2576,25 +2588,10 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 				sl_inputs.write[mfi].mesh = meshes_found[mfi].mesh;
 				sl_inputs.write[mfi].xform = meshes_found[mfi].xform;
 				sl_inputs.write[mfi].overrides = meshes_found[mfi].overrides;
+				sl_inputs.write[mfi].surfaces = sl_surface_arrays[mfi];
 			}
+			sl_surface_arrays.clear();
 			_collect_surface_light_patches(sl_inputs, MAX(0.01f, bias), surface_light_islands);
-		}
-		// Persist the emitting islands so the runtime can stand a specular proxy per
-		// island without re-running the collector. energy folds radiance_scale in, so it
-		// is the analytic light's effective energy; frame is the lightmapper's (GI-local).
-		r_state.surface_lights.clear();
-		for (const SurfaceLightIslandLight &sl : surface_light_islands) {
-			if (sl.occluded) {
-				continue;
-			}
-			Dictionary d;
-			d["position"] = sl.pos;
-			d["normal"] = sl.normal;
-			d["color"] = sl.color;
-			d["energy"] = sl.energy * sl.radiance_scale;
-			d["area"] = sl.area;
-			d["radius"] = sl.bounding_radius;
-			r_state.surface_lights.push_back(d);
 		}
 		// </ELIM>
 	}
@@ -2840,6 +2837,7 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 	r_state.environment_image = environment_image;
 	r_state.environment_transform = environment_transform;
 	r_state.exposure_normalization = exposure_normalization;
+	_snapshot_bake_params(r_state);
 	return BAKE_ERROR_OK;
 }
 
@@ -2854,10 +2852,43 @@ void LightmapGI::_bake_gpu_internal(BakeState &p_state, Lightmapper::BakeStepFun
 	bsud.from_percent = 0.2;
 	bsud.to_percent = 0.8;
 
-	p_state.gpu_err = p_state.lightmapper->bake(Lightmapper::BakeQuality(bake_quality), use_denoiser, denoiser_strength, denoiser_range, bounces,
-			bounce_indirect_energy, bias, max_texture_size, directional, shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE, use_texture_for_bounces,
-			Lightmapper::GenerateProbes(gen_probes), p_state.environment_image, p_state.environment_transform, _lightmap_bake_step_function, &bsud, p_state.exposure_normalization, (supersampling_enabled ? supersampling_factor : 1),
-			/* <ELIM> */ bounce_saturation /* </ELIM> */);
+	p_state.gpu_err = p_state.lightmapper->bake(Lightmapper::BakeQuality(p_state.quality), p_state.use_denoiser, p_state.denoiser_strength, p_state.denoiser_range, p_state.bounces,
+			p_state.bounce_indirect_energy, p_state.bias, p_state.max_texture_size, p_state.directional, p_state.shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE, p_state.use_texture_for_bounces,
+			Lightmapper::GenerateProbes(p_state.gen_probes), p_state.environment_image, p_state.environment_transform, _lightmap_bake_step_function, &bsud, p_state.exposure_normalization, p_state.supersampling_factor,
+			p_state.bounce_saturation);
+}
+
+void LightmapGI::_snapshot_bake_params(BakeState &r_state) const {
+	r_state.quality = bake_quality;
+	r_state.use_denoiser = use_denoiser;
+	r_state.denoiser_strength = denoiser_strength;
+	r_state.denoiser_range = denoiser_range;
+	r_state.bounces = bounces;
+	r_state.bounce_indirect_energy = bounce_indirect_energy;
+	r_state.bounce_saturation = bounce_saturation;
+	r_state.bias = bias;
+	r_state.max_texture_size = max_texture_size;
+	r_state.supersampling_factor = supersampling_enabled ? supersampling_factor : 1.0f;
+	r_state.directional = directional;
+	r_state.interior = interior;
+	r_state.use_texture_for_bounces = use_texture_for_bounces;
+	r_state.shadowmask_mode = shadowmask_mode;
+	r_state.gen_probes = gen_probes;
+}
+
+LightmapGI::BakeError LightmapGI::_map_lightmapper_error(Lightmapper::BakeError p_error) {
+	switch (p_error) {
+		case Lightmapper::BAKE_ERROR_TEXTURE_EXCEEDS_MAX_SIZE:
+			return BAKE_ERROR_TEXTURE_SIZE_TOO_SMALL;
+		case Lightmapper::BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES:
+			return BAKE_ERROR_MESHES_INVALID;
+		case Lightmapper::BAKE_ERROR_ATLAS_TOO_SMALL:
+			return BAKE_ERROR_ATLAS_TOO_SMALL;
+		case Lightmapper::BAKE_ERROR_USER_ABORTED:
+			return BAKE_ERROR_USER_ABORTED;
+		default:
+			return BAKE_ERROR_OK;
+	}
 }
 
 // PHASE 3 (MAIN THREAD): everything that touches the global RS or the scene
@@ -2869,14 +2900,9 @@ LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Li
 	float exposure_normalization = p_state.exposure_normalization;
 	String p_image_data_path = p_state.image_data_path;
 
-	if (p_state.gpu_err == Lightmapper::BAKE_ERROR_TEXTURE_EXCEEDS_MAX_SIZE) {
-		return BAKE_ERROR_TEXTURE_SIZE_TOO_SMALL;
-	} else if (p_state.gpu_err == Lightmapper::BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES) {
-		return BAKE_ERROR_MESHES_INVALID;
-	} else if (p_state.gpu_err == Lightmapper::BAKE_ERROR_ATLAS_TOO_SMALL) {
-		return BAKE_ERROR_ATLAS_TOO_SMALL;
-	} else if (p_state.gpu_err == Lightmapper::BAKE_ERROR_USER_ABORTED) {
-		return BAKE_ERROR_USER_ABORTED;
+	const BakeError gpu_err = _map_lightmapper_error(p_state.gpu_err);
+	if (gpu_err != BAKE_ERROR_OK) {
+		return gpu_err;
 	}
 	// </ELIM>
 
@@ -2886,7 +2912,10 @@ LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Li
 
 	const String texture_filename = p_image_data_path.get_basename();
 	const int shadowmask_texture_count = lightmapper->get_shadowmask_texture_count();
-	const bool save_shadowmask = shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE && shadowmask_texture_count > 0;
+	// <ELIM>
+	// const bool save_shadowmask = shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE && shadowmask_texture_count > 0;
+	const bool save_shadowmask = p_state.shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE && shadowmask_texture_count > 0;
+	// </ELIM>
 
 	// Save the lightmap atlases.
 	BakeError save_err = _save_and_reimport_atlas_textures(lightmapper, texture_filename, lightmap_textures, false);
@@ -2922,8 +2951,12 @@ LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Li
 	gi_data->set_sky_visibility_texture(_pack_sky_visibility(lightmapper));
 	// </ELIM>
 
-	gi_data->set_uses_spherical_harmonics(directional);
-	gi_data->_set_uses_packed_directional(directional); // New SH lightmaps are packed automatically.
+	// <ELIM>
+	// gi_data->set_uses_spherical_harmonics(directional);
+	// gi_data->_set_uses_packed_directional(directional); // New SH lightmaps are packed automatically.
+	gi_data->set_uses_spherical_harmonics(p_state.directional);
+	gi_data->_set_uses_packed_directional(p_state.directional); // New SH lightmaps are packed automatically.
+	// </ELIM>
 
 	for (int i = 0; i < lightmapper->get_bake_mesh_count(); i++) {
 		Dictionary d = lightmapper->get_bake_mesh_userdata(i);
@@ -3085,14 +3118,17 @@ LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Li
 #endif
 		}
 
-		gi_data->set_capture_data(bounds, interior, Vector<Vector3>(probe_points), Vector<Color>(probe_sh), tetrahedrons, bsp_array, exposure_normalization, bake_probe_hash);
+		// <ELIM>
+		// gi_data->set_capture_data(bounds, interior, Vector<Vector3>(probe_points), Vector<Color>(probe_sh), tetrahedrons, bsp_array, exposure_normalization, bake_probe_hash);
+		gi_data->set_capture_data(bounds, p_state.interior, Vector<Vector3>(probe_points), Vector<Color>(probe_sh), tetrahedrons, bsp_array, exposure_normalization, bake_probe_hash);
+		// </ELIM>
 	} else {
-		gi_data->set_capture_data(bounds, interior, Vector<Vector3>(probe_points), Vector<Color>(probe_sh), gi_data->get_capture_tetrahedra(), gi_data->get_capture_bsp_tree(), exposure_normalization, bake_probe_hash);
+		// <ELIM>
+		// gi_data->set_capture_data(bounds, interior, Vector<Vector3>(probe_points), Vector<Color>(probe_sh), gi_data->get_capture_tetrahedra(), gi_data->get_capture_bsp_tree(), exposure_normalization, bake_probe_hash);
+		gi_data->set_capture_data(bounds, p_state.interior, Vector<Vector3>(probe_points), Vector<Color>(probe_sh), gi_data->get_capture_tetrahedra(), gi_data->get_capture_bsp_tree(), exposure_normalization, bake_probe_hash);
+		// </ELIM>
 	}
 
-	// <ELIM> Emitter islands for runtime specular proxies.
-	gi_data->set_surface_lights(p_state.surface_lights);
-	// </ELIM>
 	gi_data->set_path(p_image_data_path, true);
 	Error err = ResourceSaver::save(gi_data);
 
@@ -3132,62 +3168,109 @@ LightmapGI::BakeError LightmapGI::bake_scripted(Node *p_from_node, const String 
 // node at a time). bake_prepare/bake_finalize must run on the main thread;
 // bake_gpu is safe to call from a worker Thread. The progress Callable is
 // invoked synchronously within each call, so passing &progress (a local) is
-// safe even for bake_gpu.
+// safe even for bake_gpu. bake_abort is safe at any point: while bake_gpu runs
+// it hands the state to the worker, which cancels and frees it.
 LightmapGI::BakeError LightmapGI::bake_prepare(Node *p_from_node, const String &p_image_data_path, const Callable &p_progress) {
-	if (pending_bake) {
-		memdelete(pending_bake);
-		pending_bake = nullptr;
-	}
-	pending_bake = memnew(BakeState);
+	_release_pending_bake();
+	BakeState *state = memnew(BakeState);
 
 	Callable progress = p_progress;
 	Lightmapper::BakeStepFunc step = p_progress.is_valid() ? _bake_step_to_callable : nullptr;
 	void *ud = p_progress.is_valid() ? (void *)&progress : nullptr;
 
-	BakeError err = _bake_prepare_internal(p_from_node, p_image_data_path, step, ud, *pending_bake);
+	BakeError err = _bake_prepare_internal(p_from_node, p_image_data_path, step, ud, *state);
 	if (err != BAKE_ERROR_OK) {
-		memdelete(pending_bake);
-		pending_bake = nullptr;
+		memdelete(state);
+		return err;
 	}
+
+	MutexLock lock(pending_bake_mutex);
+	pending_bake = state;
 	return err;
 }
 
-LightmapGI::BakeError LightmapGI::bake_gpu(const Callable &p_progress) {
-	ERR_FAIL_NULL_V_MSG(pending_bake, BAKE_ERROR_NO_SCENE_ROOT, "LightmapGI.bake_gpu() called without a successful bake_prepare().");
-
-	Callable progress = p_progress;
-	Lightmapper::BakeStepFunc step = p_progress.is_valid() ? _bake_step_to_callable : nullptr;
-	void *ud = p_progress.is_valid() ? (void *)&progress : nullptr;
-
-	_bake_gpu_internal(*pending_bake, step, ud);
-
-	switch (pending_bake->gpu_err) {
-		case Lightmapper::BAKE_ERROR_TEXTURE_EXCEEDS_MAX_SIZE:
-			return BAKE_ERROR_TEXTURE_SIZE_TOO_SMALL;
-		case Lightmapper::BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES:
-			return BAKE_ERROR_MESHES_INVALID;
-		case Lightmapper::BAKE_ERROR_ATLAS_TOO_SMALL:
-			return BAKE_ERROR_ATLAS_TOO_SMALL;
-		case Lightmapper::BAKE_ERROR_USER_ABORTED:
-			return BAKE_ERROR_USER_ABORTED;
-		default:
-			return BAKE_ERROR_OK;
+bool LightmapGI::_bake_gpu_step(float p_completion, const String &p_text, void *p_ud, bool p_refresh) {
+	const GpuStepUD *gsud = (const GpuStepUD *)p_ud;
+	{
+		MutexLock lock(gsud->state->mutex);
+		if (gsud->state->abandoned) {
+			return true;
+		}
 	}
+	return gsud->func && gsud->func(p_completion, p_text, gsud->ud, p_refresh);
+}
+
+LightmapGI::BakeError LightmapGI::bake_gpu(const Callable &p_progress) {
+	BakeState *state = nullptr;
+	{
+		MutexLock lock(pending_bake_mutex);
+		ERR_FAIL_NULL_V_MSG(pending_bake, BAKE_ERROR_NO_SCENE_ROOT, "LightmapGI.bake_gpu() called without a successful bake_prepare().");
+		state = pending_bake;
+		MutexLock state_lock(state->mutex);
+		ERR_FAIL_COND_V_MSG(state->gpu_running, BAKE_ERROR_USER_ABORTED, "LightmapGI.bake_gpu() is already running.");
+		state->gpu_running = true;
+	}
+
+	// From here only the state is touched: an abort may detach it from the node.
+	Callable progress = p_progress;
+	GpuStepUD gsud;
+	gsud.state = state;
+	gsud.func = p_progress.is_valid() ? _bake_step_to_callable : nullptr;
+	gsud.ud = p_progress.is_valid() ? (void *)&progress : nullptr;
+
+	_bake_gpu_internal(*state, _bake_gpu_step, &gsud);
+
+	// Once gpu_running is cleared an abort may free the state, so read it first.
+	bool abandoned = false;
+	Lightmapper::BakeError gpu_err = Lightmapper::BAKE_OK;
+	{
+		MutexLock state_lock(state->mutex);
+		state->gpu_running = false;
+		abandoned = state->abandoned;
+		gpu_err = state->gpu_err;
+	}
+	if (abandoned) {
+		memdelete(state);
+		return BAKE_ERROR_USER_ABORTED;
+	}
+	return _map_lightmapper_error(gpu_err);
 }
 
 LightmapGI::BakeError LightmapGI::bake_finalize() {
-	ERR_FAIL_NULL_V_MSG(pending_bake, BAKE_ERROR_NO_SCENE_ROOT, "LightmapGI.bake_finalize() called without a successful bake_prepare().");
-	BakeError err = _bake_finalize_internal(*pending_bake, nullptr, nullptr);
-	memdelete(pending_bake);
-	pending_bake = nullptr;
+	BakeState *state = nullptr;
+	{
+		MutexLock lock(pending_bake_mutex);
+		ERR_FAIL_NULL_V_MSG(pending_bake, BAKE_ERROR_NO_SCENE_ROOT, "LightmapGI.bake_finalize() called without a successful bake_prepare().");
+		MutexLock state_lock(pending_bake->mutex);
+		ERR_FAIL_COND_V_MSG(pending_bake->gpu_running, BAKE_ERROR_USER_ABORTED, "LightmapGI.bake_finalize() called while bake_gpu() is still running.");
+		state = pending_bake;
+		pending_bake = nullptr;
+	}
+	BakeError err = _bake_finalize_internal(*state, nullptr, nullptr);
+	memdelete(state);
 	return err;
 }
 
 void LightmapGI::bake_abort() {
-	if (pending_bake) {
-		memdelete(pending_bake);
-		pending_bake = nullptr;
+	_release_pending_bake();
+}
+
+// Frees the pending state, or hands it to a running bake_gpu worker to free.
+void LightmapGI::_release_pending_bake() {
+	MutexLock lock(pending_bake_mutex);
+	if (!pending_bake) {
+		return;
 	}
+	BakeState *state = pending_bake;
+	pending_bake = nullptr;
+	{
+		MutexLock state_lock(state->mutex);
+		if (state->gpu_running) {
+			state->abandoned = true;
+			return;
+		}
+	}
+	memdelete(state);
 }
 // </ELIM>
 
@@ -3757,9 +3840,6 @@ LightmapGI::LightmapGI() {
 // <ELIM> Free any in-flight threaded-bake state (e.g. if the node is destroyed
 // after bake_prepare but before bake_finalize/bake_abort).
 LightmapGI::~LightmapGI() {
-	if (pending_bake) {
-		memdelete(pending_bake);
-		pending_bake = nullptr;
-	}
+	_release_pending_bake();
 }
 // </ELIM>
