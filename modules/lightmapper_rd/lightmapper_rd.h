@@ -309,6 +309,11 @@ class LightmapperRD : public Lightmapper {
 		uint32_t pad[2] = {};
 	};
 
+	// <ELIM> Texel AA samples per punctual shadow ray set; injected into
+	// lm_compute.glsl as LM_AA_SAMPLES so the dispatch cost model cannot drift.
+	static constexpr int SHADOW_AA_SAMPLES = 16;
+	// </ELIM>
+
 	struct PushConstant {
 		uint32_t atlas_slice = 0;
 		uint32_t ray_count = 0;

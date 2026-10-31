@@ -52,24 +52,10 @@ void initialize_lightmapper_rd_module(ModuleInitializationLevel p_level) {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_quality/ultra_quality_ray_count", PROPERTY_HINT_RANGE, "1,4096,1,or_greater"), 2048);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/max_rays_per_pass", PROPERTY_HINT_RANGE, "1,256,1,or_greater"), 4);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/region_size", PROPERTY_HINT_RANGE, "1,4096,1,or_greater"), 512);
-	// <ELIM> TDR guard for the direct-light pass. The direct pass loops every light
-	// for every texel, so a single compute dispatch costs
-	// O(region_texels * lights * shadow_rays); emissive surface-light maps push the
-	// light count into the thousands and one dispatch runs long enough to trip the
-	// GPU driver watchdog (DEVICE_REMOVED). LightmapperRD::bake() batches the light
-	// loop so each dispatch's estimated worst-case trace count
-	// (region_texels * lights_in_batch * soft_shadow_rays_per_texel) stays under
-	// max_traces_per_dispatch. Sizing by traces (not a fixed light count) auto-shrinks
-	// the batch at high quality — where each light fires ~16x more soft-shadow rays —
-	// and keeps it large at low quality / quickbake. Keep the target well under the
-	// ~2s watchdog: assuming a pessimistic ~1e9 incoherent traces/s, the default
-	// 5e8 is ~0.5s worst case and ~4x below the empirically-safe point (a 256-light
-	// LOW-quality dispatch that bakes fine is ~2.1e9 worst-case traces). Lower it if
-	// a heavy map still trips the watchdog; raise it if bakes over-split and run slow.
-	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/max_traces_per_dispatch", PROPERTY_HINT_RANGE, "1000000,10000000000,1,or_greater"), 500000000);
-	// Upper clamp on the cost-aware batch size above (and the light count below which
-	// a bake still runs in a single, bit-identical batch). See LightmapperRD::bake().
-	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/max_lights_per_pass", PROPERTY_HINT_RANGE, "1,65536,1,or_greater"), 256);
+	// <ELIM> TDR guard: the direct and bounce passes size each compute dispatch so
+	// its measured GPU time stays near this target. Windows resets the device after
+	// 2 s (TdrDelay); 250 ms leaves 8x headroom for a dispatch heavier than the last.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lightmapping/bake_performance/dispatch_target_msec", PROPERTY_HINT_RANGE, "1,1000,1"), 250);
 	// Visibility rays per texel per analytic area-poly surface light (direct
 	// pass). The analytic term is exact; these rays only estimate occlusion, so
 	// noise appears solely in partial-shadow regions. Read into the push

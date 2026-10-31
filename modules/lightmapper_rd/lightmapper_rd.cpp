@@ -38,6 +38,7 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/math/geometry_2d.h"
+#include "core/os/os.h" // <ELIM> Dispatch timing. </ELIM>
 #ifdef TOOLS_ENABLED // <ELIM> OIDN denoising is editor-only; runtime bakes use JNLM.
 #include "editor/file_system/editor_paths.h"
 #include "editor/settings/editor_settings.h"
@@ -1294,17 +1295,148 @@ LightmapperRD::BakeError LightmapperRD::_denoise(RenderingDevice *p_rd, Ref<RDSh
 	return BAKE_OK;
 }
 
-// <ELIM> End (exclusive) of the direct-light batch starting at p_from: greedy by
-// cost under p_budget, at most p_max_lights lights, never empty.
-static int _next_light_batch_end(const LocalVector<int64_t> &p_costs, int p_from, int p_max_lights, int64_t p_budget) {
-	const int count = (int)p_costs.size();
-	int to = p_from;
-	int64_t acc = 0;
-	while (to < count && (to - p_from) < p_max_lights && (to == p_from || acc + p_costs[to] <= p_budget)) {
-		acc += p_costs[to];
-		to++;
+// <ELIM> TDR guard. The direct and bounce passes are split into dispatches whose
+// GPU time is measured (submit + sync wall time on the bake's local device, an
+// upper bound on the GPU's own time) and kept under a target well below the
+// driver watchdog. Work is counted in cost units: worst-case BVH traces per
+// occupied texel. The model only has to rank work; the measured rate converts it
+// to time.
+
+// First-dispatch rate in cost units per usec, below what a slow integrated GPU
+// manages on the costliest light, so the first dispatch is short on any hardware.
+static constexpr double LM_DISPATCH_SEED_UNITS_PER_USEC = 4.0;
+// Batches are sized for this fraction of the target: on real maps the rate per
+// unit varies ~3x between batches (range-culled lights cost far below worst case).
+static constexpr double LM_DISPATCH_AIM_FRACTION = 0.4;
+// How fast a slow measurement is forgotten, per dispatch, so one fast batch
+// cannot size the next one alone.
+static constexpr double LM_DISPATCH_RATE_DECAY = 0.8;
+// Smallest row band a region is split into; one 8x8 workgroup row.
+static constexpr int LM_DISPATCH_MIN_BAND_ROWS = 8;
+
+class LightmapDispatchPacer {
+	double target_usec = 0.0;
+	double aim_usec = 0.0;
+	double budget = 0.0; // Cost units the next dispatch may spend.
+	double usec_per_unit = 0.0; // Slowest recent rate; 0 until measured.
+
+public:
+	int dispatches = 0;
+	int over_target = 0;
+	int unsplittable_over_target = 0;
+	int band_splits = 0;
+	uint64_t total_usec = 0;
+	uint64_t max_usec = 0;
+	double min_budget = 0.0;
+	double max_budget = 0.0;
+
+	double get_budget() const { return budget; }
+
+	void record(double p_units, uint64_t p_usec, bool p_unsplittable) {
+		dispatches++;
+		total_usec += p_usec;
+		max_usec = MAX(max_usec, p_usec);
+		if ((double)p_usec > target_usec) {
+			over_target++;
+			if (p_unsplittable) {
+				unsplittable_over_target++;
+			}
+		}
+		if (p_units <= 0.0) {
+			return;
+		}
+		const double rate = (double)MAX(p_usec, (uint64_t)1) / p_units;
+		usec_per_unit = MAX(rate, usec_per_unit * LM_DISPATCH_RATE_DECAY);
+		// Grow only from evidence at the measured scale; shrink at once.
+		budget = MIN(aim_usec / usec_per_unit, MAX(budget, 2.0 * p_units));
+		min_budget = MIN(min_budget, budget);
+		max_budget = MAX(max_budget, budget);
 	}
-	return to;
+
+	void print_summary(const char *p_pass) const {
+		print_verbose(vformat("LightmapGI/RD: %s pass: %d dispatch(es), max %.1f ms, mean %.1f ms (target %.0f ms), %d over target, %d band split(s), budget %.0f..%.0f units.",
+				p_pass, dispatches, max_usec / 1000.0, dispatches > 0 ? total_usec / 1000.0 / dispatches : 0.0, target_usec / 1000.0, over_target, band_splits, min_budget, max_budget));
+		if (unsplittable_over_target > 0) {
+			WARN_PRINT(vformat("LightmapGI/RD: %s pass: %d dispatch(es) of a single light or ray over a %d-row band ran over the %.0f ms target (worst %.1f ms) and cannot be split further; lower the bake quality or region_size if the GPU driver resets.",
+					p_pass, unsplittable_over_target, LM_DISPATCH_MIN_BAND_ROWS, target_usec / 1000.0, max_usec / 1000.0));
+		}
+	}
+
+	explicit LightmapDispatchPacer(double p_target_usec) {
+		target_usec = p_target_usec;
+		aim_usec = p_target_usec * LM_DISPATCH_AIM_FRACTION;
+		budget = aim_usec * LM_DISPATCH_SEED_UNITS_PER_USEC;
+		min_budget = budget;
+		max_budget = budget;
+	}
+};
+
+// Texels of p_rect covered by its slice's mesh rects. Texels outside every rect
+// are empty and cost nothing; the 1-texel margin keeps a chart edge rasterized
+// just outside its rect inside a dispatched band.
+static double _occupied_texels(const LocalVector<Rect2i> &p_slice_rects, const Rect2i &p_rect) {
+	int64_t texels = 0;
+	for (const Rect2i &r : p_slice_rects) {
+		const Rect2i overlap = r.grow(1).intersection(p_rect);
+		texels += (int64_t)overlap.size.x * overlap.size.y;
+	}
+	return (double)texels;
+}
+
+// Runs items [0, p_item_count) over every texel of a region p_h rows tall, one
+// dispatch per (row band, item batch), each sized by the pacer. A band whose next
+// batch is over budget is halved down to LM_DISPATCH_MIN_BAND_ROWS; below that
+// p_next_end may split an indivisible run. Every band runs its items in order, so
+// the shader's per-texel accumulation always sees the item-0 batch first. A band
+// with no occupied texels is skipped: the shader would not touch it.
+// p_texels(row_ofs, rows) -> occupied texels of a band.
+// p_next_end(from, budget_per_texel, can_split_runs, r_cost_per_texel) -> end,
+// never empty. p_dispatch(row_ofs, rows, from, to) records, submits and syncs.
+// p_progress(region_fraction) returns true to abort.
+template <typename Texels, typename NextEnd, typename Dispatch, typename Progress>
+static bool _dispatch_region_paced(LightmapDispatchPacer &p_pacer, int p_h, int p_item_count, double p_total_cost_per_texel, const Texels &p_texels, const NextEnd &p_next_end, const Dispatch &p_dispatch, const Progress &p_progress) {
+	struct Band {
+		int row_ofs = 0;
+		int rows = 0;
+		int from = 0;
+	};
+	LocalVector<Band> stack;
+	stack.push_back({ 0, p_h, 0 });
+	const double total_units = MAX(1.0, p_texels(0, p_h) * p_total_cost_per_texel);
+	double done_units = 0.0;
+	while (!stack.is_empty()) {
+		Band band = stack[stack.size() - 1];
+		stack.resize(stack.size() - 1);
+		const double texels = p_texels(band.row_ofs, band.rows);
+		if (texels <= 0.0) {
+			continue;
+		}
+		const bool min_band = band.rows <= LM_DISPATCH_MIN_BAND_ROWS;
+		do {
+			const double budget_per_texel = p_pacer.get_budget() / texels;
+			double cost = 0.0;
+			const int to = p_next_end(band.from, budget_per_texel, min_band, cost);
+			// The tolerance keeps a batch packed exactly to budget from splitting on rounding.
+			if (!min_band && cost > budget_per_texel * (1.0 + 1e-9)) {
+				const int half = MAX(LM_DISPATCH_MIN_BAND_ROWS, (band.rows / 2) / LM_DISPATCH_MIN_BAND_ROWS * LM_DISPATCH_MIN_BAND_ROWS);
+				stack.push_back({ band.row_ofs + half, band.rows - half, band.from });
+				stack.push_back({ band.row_ofs, half, band.from });
+				p_pacer.band_splits++;
+				break;
+			}
+
+			const uint64_t start_usec = OS::get_singleton()->get_ticks_usec();
+			p_dispatch(band.row_ofs, band.rows, band.from, to);
+			p_pacer.record(cost * texels, OS::get_singleton()->get_ticks_usec() - start_usec, min_band && to - band.from <= 1);
+			band.from = to;
+
+			done_units += cost * texels;
+			if (p_progress(MIN(1.0, done_units / total_units))) {
+				return false;
+			}
+		} while (band.from < p_item_count);
+	}
+	return true;
 }
 // </ELIM>
 
@@ -1931,6 +2063,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	Ref<RDShaderFile> compute_shader;
 	String defines = "";
 	defines += "\n#define CLUSTER_SIZE " + uitos(cluster_size) + "\n";
+	// <ELIM>
+	defines += "\n#define LM_AA_SAMPLES " + itos(SHADOW_AA_SAMPLES) + "\n";
+	// </ELIM>
 
 	if (p_bake_sh) {
 		defines += "\n#define USE_SH_LIGHTMAPS\n";
@@ -2101,6 +2236,18 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 	push_constant.ray_count = CLAMP(push_constant.ray_count, 16u, 8192u);
 
+	// <ELIM> Measured-time target for the direct and bounce dispatches (TDR guard),
+	// and each slice's mesh rects, which say how many texels a dispatch covers.
+	const double dispatch_target_usec = 1000.0 * CLAMP((int)GLOBAL_GET("rendering/lightmapping/bake_performance/dispatch_target_msec"), 1, 1000);
+	LocalVector<LocalVector<Rect2i>> atlas_rects;
+	atlas_rects.resize(atlas_slices);
+	for (const MeshInstance &mi : mesh_instances) {
+		if (!mi.trace_only) {
+			atlas_rects[mi.slice].push_back(Rect2i(mi.offset, mi.data.albedo_on_uv2->get_size()));
+		}
+	}
+	// </ELIM>
+
 	/* PRIMARY (direct) LIGHT PASS */
 	{
 		Vector<RD::Uniform> uniforms;
@@ -2166,49 +2313,67 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 		RID light_uniform_set = rd->uniform_set_create(uniforms, compute_shader_primary, 1);
 
-		// <ELIM> TDR guard: the direct pass evaluates every light for every texel, so
-		// one dispatch costs region_texels * sum(light cost), and thousands of
-		// emitter lights at high ray counts trip the GPU watchdog. Lights are split
-		// into batches whose estimated worst-case traces stay under
-		// max_traces_per_dispatch, one dispatch + sync each. A light set that fits
-		// one batch takes the shader's first_light_batch store path, as upstream.
+		// <ELIM> TDR guard: every texel evaluates every light, so a region costs
+		// texels * sum(light cost); it runs as paced dispatches (see
+		// _dispatch_region_paced). A fixture's lights stay in one batch when they fit,
+		// so the emitter-arc pass sums the fixture as one run.
 		const int total_light_count = (int)lights.size();
-		const int max_lights_per_pass = MAX(1, (int)GLOBAL_GET("rendering/lightmapping/bake_performance/max_lights_per_pass"));
-		const int64_t max_traces_per_dispatch = MAX((int64_t)1, (int64_t)GLOBAL_GET("rendering/lightmapping/bake_performance/max_traces_per_dispatch"));
-		// Soft-shadow BVH traces per light per texel; must match lm_compute.glsl
-		// (const int AA_SAMPLES = 16; shadowing_ray_count = max(1, ray_count / 16)).
-		const int64_t aa_samples = 16;
-		const int64_t rays_per_texel = aa_samples * MAX((int64_t)1, (int64_t)push_constant.ray_count / aa_samples);
-		// Per-light per-texel cost in trace-equivalents. An AREA_POLY light also
-		// walks its polygon twice per texel (irradiance, then ray allocation), so
-		// each of its triangles is charged two traces on top.
-		LocalVector<int64_t> light_cost;
-		light_cost.resize(total_light_count);
-		int64_t poly_tris_total = 0;
+		const double soft_shadow_rays = (double)SHADOW_AA_SAMPLES * MAX(1, (int)push_constant.ray_count / SHADOW_AA_SAMPLES);
+		LocalVector<double> light_cost_prefix; // Summed per-texel cost of lights [0, i).
+		LocalVector<int> light_run_end; // End of the fixture run holding light i.
+		light_cost_prefix.resize(total_light_count + 1);
+		light_run_end.resize(total_light_count);
+		light_cost_prefix[0] = 0.0;
+		int poly_tris_total = 0;
 		for (int li = 0; li < total_light_count; li++) {
-			int64_t c = rays_per_texel;
-			if (lights[li].type == LIGHT_TYPE_AREA_POLY) {
+			const Light &l = lights[li];
+			double cost = l.size > 0.0f ? soft_shadow_rays : (double)SHADOW_AA_SAMPLES;
+			if (l.type == LIGHT_TYPE_AREA_POLY) {
 				uint32_t tri_count = 0;
-				memcpy(&tri_count, &lights[li].cos_spot_angle, sizeof(uint32_t));
-				c += 2 * (int64_t)tri_count;
-				poly_tris_total += (int64_t)tri_count;
+				memcpy(&tri_count, &l.cos_spot_angle, sizeof(uint32_t));
+				// Visibility rays, plus the two analytic walks over the polygon.
+				cost = (double)push_constant.surface_light_vis_rays + 2.0 * tri_count;
+				poly_tris_total += (int)tri_count;
 			}
-			light_cost[li] = c;
+			light_cost_prefix[li + 1] = light_cost_prefix[li] + cost;
 		}
-		{
-			// Diagnostic for the full (bottleneck) region; edge regions get a larger
-			// batch computed in the loop. Always printed so a bake hang/crash can be
-			// traced to the chosen granularity.
-			const int64_t rep_texels = (int64_t)max_region_size * (int64_t)max_region_size;
-			const int64_t rep_budget = MAX((int64_t)1, max_traces_per_dispatch / rep_texels);
-			int rep_iterations = 0;
-			for (int li = 0; li < total_light_count; li = _next_light_batch_end(light_cost, li, max_lights_per_pass, rep_budget)) {
-				rep_iterations++;
+		for (int li = total_light_count - 1; li >= 0; li--) {
+			const bool same_run = li + 1 < total_light_count && lights[li].type == LIGHT_TYPE_AREA_POLY && lights[li + 1].type == LIGHT_TYPE_AREA_POLY && memcmp(&lights[li].inv_spot_attenuation, &lights[li + 1].inv_spot_attenuation, sizeof(float)) == 0;
+			light_run_end[li] = same_run ? light_run_end[li + 1] : li + 1;
+		}
+		int fixture_runs = 0;
+		for (int li = 0; li < total_light_count; li = light_run_end[li]) {
+			fixture_runs++;
+		}
+		print_verbose(vformat("LightmapGI/RD: direct pass: %d light(s) in %d fixture run(s) (%d area-poly tri(s)), ray_count=%d, %.0f cost units/texel.",
+				total_light_count, fixture_runs, poly_tris_total, (int)push_constant.ray_count, light_cost_prefix[total_light_count]));
+
+		// Whole fixture runs while they fit; a run over budget goes alone, and is
+		// split light by light only when p_split_runs (the band is already minimal).
+		auto next_light_end = [&](int p_from, double p_budget, bool p_split_runs, double &r_cost) -> int {
+			int to = p_from;
+			while (to < total_light_count) {
+				const int run_end = light_run_end[to];
+				if (light_cost_prefix[run_end] - light_cost_prefix[p_from] <= p_budget) {
+					to = run_end;
+					continue;
+				}
+				if (to == p_from) {
+					if (p_split_runs) {
+						to++;
+						while (to < run_end && light_cost_prefix[to + 1] - light_cost_prefix[p_from] <= p_budget) {
+							to++;
+						}
+					} else {
+						to = run_end;
+					}
+				}
+				break;
 			}
-			rep_iterations = MAX(1, rep_iterations);
-			print_line(vformat("LightmapGI/RD: direct-light batching: %d light(s) (%d area-poly tri(s)), ray_count=%d (~%d soft-shadow traces/texel/light), region=%d^2 -> %d batch(es)/region.",
-					total_light_count, (int)poly_tris_total, (int)push_constant.ray_count, (int)rays_per_texel, max_region_size, rep_iterations));
-		}
+			r_cost = light_cost_prefix[to] - light_cost_prefix[p_from];
+			return to;
+		};
+		LightmapDispatchPacer direct_pacer(dispatch_target_usec);
 		// </ELIM>
 
 		int count = 0;
@@ -2226,10 +2391,10 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 					push_constant.region_ofs[1] = y;
 
 					group_size = Vector3i(Math::division_round_up(w, 8), Math::division_round_up(h, 8), 1);
-					// <ELIM> Cost-aware light batches sized from this region's texel
-					// count. The sync between batches makes batch k's accumulator writes
-					// visible to batch k+1's read-modify-write; batch 0 initializes the
-					// outputs (lm_compute.glsl first_light_batch).
+					// <ELIM> Paced (row band, light batch) dispatches. The sync after each
+					// makes its accumulator writes visible to the next batch's
+					// read-modify-write; a band's light-0 batch initializes the outputs
+					// (lm_compute.glsl first_light_batch).
 					// RD::ComputeListID compute_list = rd->compute_list_begin();
 					// rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_primary_pipeline);
 					// rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
@@ -2239,28 +2404,41 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 					// rd->compute_list_end();
 					// rd->submit();
 					// rd->sync();
-					const int64_t region_texels = (int64_t)w * (int64_t)h;
-					const int64_t budget = MAX((int64_t)1, max_traces_per_dispatch / MAX((int64_t)1, region_texels));
-					int light_from = 0;
-					// do/while: with no lights at all the region still needs its one
-					// dispatch, which is what initializes the outputs (first_light_batch).
-					do {
-						const int light_to = _next_light_batch_end(light_cost, light_from, max_lights_per_pass, budget);
-						push_constant.light_from = (uint32_t)light_from;
-						push_constant.light_to = (uint32_t)light_to;
-						light_from = light_to;
-
+					auto dispatch_lights = [&](int p_row_ofs, int p_rows, int p_from, int p_to) {
+						push_constant.region_ofs[1] = y + p_row_ofs;
+						push_constant.light_from = (uint32_t)p_from;
+						push_constant.light_to = (uint32_t)p_to;
 						RD::ComputeListID compute_list = rd->compute_list_begin();
 						rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_primary_pipeline);
 						rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
 						rd->compute_list_bind_uniform_set(compute_list, light_uniform_set, 1);
 						rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
-						rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
+						rd->compute_list_dispatch(compute_list, group_size.x, Math::division_round_up(p_rows, 8), 1);
 						rd->compute_list_end();
-
 						rd->submit();
 						rd->sync();
-					} while (light_from < total_light_count);
+					};
+					auto region_progress = [&](double p_fraction) -> bool {
+						if (!p_step_function) {
+							return false;
+						}
+						const double p = (count + p_fraction) / (atlas_slices * x_regions * y_regions);
+						return p_step_function(0.5 + p * 0.1, vformat(RTR("Plot direct lighting %d%%"), int(p * 100.0)), p_bake_userdata, false);
+					};
+					auto band_texels = [&](int p_row_ofs, int p_rows) -> double {
+						return _occupied_texels(atlas_rects[s], Rect2i(x, y + p_row_ofs, w, MIN(p_rows, h - p_row_ofs)));
+					};
+					if (!_dispatch_region_paced(direct_pacer, h, total_light_count, light_cost_prefix[total_light_count], band_texels, next_light_end, dispatch_lights, region_progress)) {
+						FREE_TEXTURES
+						FREE_BUFFERS
+						FREE_RASTER_RESOURCES
+						FREE_COMPUTE_RESOURCES
+						memdelete(rd);
+						if (rcd != nullptr) {
+							memdelete(rcd);
+						}
+						return BAKE_ERROR_USER_ABORTED;
+					}
 					// </ELIM>
 
 					count++;
@@ -2283,6 +2461,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				}
 			}
 		}
+		// <ELIM>
+		direct_pacer.print_summary("direct");
+		// </ELIM>
 	}
 
 #ifdef DEBUG_TEXTURES
@@ -2364,8 +2545,29 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		RID secondary_uniform_set;
 		secondary_uniform_set = rd->uniform_set_create(uniforms, compute_shader_secondary, 1);
 
-		const int max_rays = GLOBAL_GET("rendering/lightmapping/bake_performance/max_rays_per_pass");
-		int ray_iterations = Math::division_round_up((int32_t)push_constant.ray_count, max_rays);
+		// <ELIM> Paced like the direct pass, which supersedes max_rays_per_pass.
+		// const int max_rays = GLOBAL_GET("rendering/lightmapping/bake_performance/max_rays_per_pass");
+		// int ray_iterations = Math::division_round_up((int32_t)push_constant.ray_count, max_rays);
+		// A path traces up to `bounces` segments; without the light texture every hit
+		// also shades every light with one hard-shadow (or one-visibility-ray) trace.
+		double hit_cost = 1.0;
+		if (!p_texture_for_bounces) {
+			for (const Light &l : lights) {
+				uint32_t tri_count = 0;
+				if (l.type == LIGHT_TYPE_AREA_POLY) {
+					memcpy(&tri_count, &l.cos_spot_angle, sizeof(uint32_t));
+				}
+				hit_cost += 1.0 + 2.0 * tri_count;
+			}
+		}
+		const double ray_cost = MAX(p_bounces, 1) * hit_cost;
+		auto next_ray_end = [&](int p_from, double p_budget, bool /* p_split_runs */, double &r_cost) -> int {
+			const int rays = MAX(1, (int)MIN(p_budget / ray_cost, (double)((int)push_constant.ray_count - p_from)));
+			r_cost = rays * ray_cost;
+			return p_from + rays;
+		};
+		LightmapDispatchPacer bounce_pacer(dispatch_target_usec);
+		// </ELIM>
 
 		if (p_step_function) {
 			if (p_step_function(0.6, RTR("Integrate indirect lighting"), p_bake_userdata, true)) {
@@ -2397,6 +2599,8 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 					group_size = Vector3i(Math::division_round_up(w, 8), Math::division_round_up(h, 8), 1);
 
+					// <ELIM> Paced (row band, ray batch) dispatches; each band traces its rays in order.
+					/*
 					for (int k = 0; k < ray_iterations; k++) {
 						RD::ComputeListID compute_list = rd->compute_list_begin();
 						rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_secondary_pipeline);
@@ -2430,9 +2634,50 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 							}
 						}
 					}
+					*/
+					auto dispatch_rays = [&](int p_row_ofs, int p_rows, int p_from, int p_to) {
+						push_constant.region_ofs[1] = y + p_row_ofs;
+						push_constant.ray_from = (uint32_t)p_from;
+						push_constant.ray_to = (uint32_t)p_to;
+						RD::ComputeListID compute_list = rd->compute_list_begin();
+						rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_secondary_pipeline);
+						rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
+						rd->compute_list_bind_uniform_set(compute_list, secondary_uniform_set, 1);
+						rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
+						rd->compute_list_dispatch(compute_list, group_size.x, Math::division_round_up(p_rows, 8), 1);
+						rd->compute_list_end();
+						rd->submit();
+						rd->sync();
+					};
+					auto region_progress = [&](double p_fraction) -> bool {
+						if (!p_step_function) {
+							return false;
+						}
+						const double p = (count + p_fraction) / (atlas_slices * x_regions * y_regions);
+						return p_step_function(0.6 + p * 0.1, vformat(RTR("Integrate indirect lighting %d%%"), int(p * 100.0)), p_bake_userdata, false);
+					};
+					auto band_texels = [&](int p_row_ofs, int p_rows) -> double {
+						return _occupied_texels(atlas_rects[s], Rect2i(x, y + p_row_ofs, w, MIN(p_rows, h - p_row_ofs)));
+					};
+					if (!_dispatch_region_paced(bounce_pacer, h, (int)push_constant.ray_count, push_constant.ray_count * ray_cost, band_texels, next_ray_end, dispatch_rays, region_progress)) {
+						FREE_TEXTURES
+						FREE_BUFFERS
+						FREE_RASTER_RESOURCES
+						FREE_COMPUTE_RESOURCES
+						memdelete(rd);
+						if (rcd != nullptr) {
+							memdelete(rcd);
+						}
+						return BAKE_ERROR_USER_ABORTED;
+					}
+					count++;
+					// </ELIM>
 				}
 			}
 		}
+		// <ELIM>
+		bounce_pacer.print_summary("bounce");
+		// </ELIM>
 	}
 
 	/* LIGHTPROBES */

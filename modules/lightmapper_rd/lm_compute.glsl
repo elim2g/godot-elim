@@ -562,7 +562,10 @@ float get_omni_attenuation(float distance, float inv_range, float decay) {
 	return nd * pow(max(distance, 0.0001), -decay);
 }
 
-const int AA_SAMPLES = 16;
+// <ELIM> Injected by LightmapperRD (SHADOW_AA_SAMPLES), which also costs dispatches by it.
+// const int AA_SAMPLES = 16;
+const int AA_SAMPLES = LM_AA_SAMPLES;
+// </ELIM>
 
 const vec2 halton_map[AA_SAMPLES] = vec2[](
 		vec2(0.5, 0.33333333),
@@ -1459,13 +1462,16 @@ void main() {
 			vec4(0.0, 0.0, 0.0, 1.0));
 #endif
 
-	// Use atlas position and a prime number as the seed.
-	uint noise = random_seed(ivec3(atlas_pos, 43573547));
+	// <ELIM> Seeded per light below, so the result does not depend on how the
+	// lights are batched (batch sizes follow measured GPU time).
+	// // Use atlas position and a prime number as the seed.
+	// uint noise = random_seed(ivec3(atlas_pos, 43573547));
+	// </ELIM>
 	// <ELIM> Iterate this batch's light range [light_from, light_to) instead of
-	// all lights (TDR guard). One batch spanning [0, light_count) is identical to
-	// the original `for (i = 0; i < bake_params.light_count; i++)`.
+	// all lights (TDR guard).
 	// for (uint i = 0; i < bake_params.light_count; i++) {
 	for (uint i = params.light_from; i < params.light_to; i++) {
+		uint noise = random_seed(ivec3(atlas_pos, 43573547 + int(i)));
 	// </ELIM>
 		vec3 light;
 		vec3 light_dir;
@@ -1683,11 +1689,17 @@ void main() {
 	int neighbor_offset = atlas_pos.x < bake_params.atlas_size.x - 1 ? 1 : -1;
 	vec3 neighbor_position = texelFetch(sampler2DArray(source_position, linear_sampler), ivec3(atlas_pos + ivec2(neighbor_offset, 0), params.atlas_slice), 0).xyz;
 	float texel_size_world_space = distance(position, neighbor_position);
-	uint noise = random_seed(ivec3(params.ray_from, atlas_pos));
+	// <ELIM> Seeded per ray below, so the result does not depend on how the rays
+	// are batched (batch sizes follow measured GPU time).
+	// uint noise = random_seed(ivec3(params.ray_from, atlas_pos));
+	// </ELIM>
 	// <ELIM> Rays are cosine-distributed, so the hit fraction is cosine-weighted.
 	uint sky_hits = 0u;
 	// </ELIM>
 	for (uint i = params.ray_from; i < params.ray_to; i++) {
+		// <ELIM>
+		uint noise = random_seed(ivec3(i, atlas_pos));
+		// </ELIM>
 		vec3 ray_dir = generate_ray_dir_from_normal(normal, noise);
 		// <ELIM>
 		// vec3 light = trace_indirect_light(position, ray_dir, noise, texel_size_world_space);
