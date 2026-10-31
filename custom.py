@@ -1,9 +1,5 @@
-# TURNT custom SCons options
-# See claude-docs/RENDERER_FORK_NOTES.md for the full rationale.
-#
-# This file is read automatically by godot-src/SConstruct (line 149) for every
-# scons invocation in this directory: editor builds, export templates, server
-# builds — all of them.
+# TURNT custom SCons options. SConstruct reads this file for every scons
+# invocation in this directory: editor builds, export templates, server builds.
 
 # OpenXR + WebXR + mobile_vr. TURNT is desktop-only; no VR runtime ships.
 disable_xr = "yes"
@@ -19,6 +15,6 @@ module_gridmap_enabled = "no"
 # has no Image.COMPRESS_BPTC backend at all: the in-game map editor's bake hits
 # ERR_UNAVAILABLE and ships an uncompressed RGBH atlas ~6x larger than an editor
 # bake of the same map. betsy is the GPU encoder taken first (compress_with_gpu
-# defaults true); cvtt is the CPU fallback the bake job already documents.
+# defaults true); cvtt is the CPU fallback.
 betsy_export_templates = "yes"
 cvtt_export_templates = "yes"

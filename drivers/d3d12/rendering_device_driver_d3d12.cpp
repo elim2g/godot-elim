@@ -5534,12 +5534,10 @@ void RenderingDeviceDriverD3D12::timestamp_query_pool_get_results(QueryPoolID p_
 }
 
 // <ELIM> TURNT Insights: convert in integer arithmetic instead of via double.
-// A D3D12 timestamp is a large absolute tick count from an arbitrary epoch --
-// measured at ~1.8e18 ns on an RTX 3090 -- which is past the range where a
-// double can represent consecutive integers. Going through double quantized
-// every result to 1024 ns, so anything under about 2 us of GPU work was
-// unmeasurable. The Vulkan driver already avoids this (see the 128-bit
-// fixed-point comment in its timestamp_query_result_to_time); D3D12 did not.
+// A D3D12 timestamp is a large absolute tick count from an arbitrary epoch, past
+// the range where a double holds consecutive integers, so the double path
+// quantized results to ~1 us. The Vulkan driver uses 128-bit fixed point for the
+// same reason.
 // uint64_t RenderingDeviceDriverD3D12::timestamp_query_result_to_time(uint64_t p_result) {
 //	return p_result / (double)device_limits.timestamp_frequency * 1000000000.0;
 // }

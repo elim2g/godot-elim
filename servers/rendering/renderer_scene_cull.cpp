@@ -3194,7 +3194,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	cull.frustum = Frustum(planes);
 
 	Vector<RID> directional_lights;
-	// <ELIM> Hoisted: the shadow setup now runs after the camera cull pass.
+	// <ELIM> Declared here: the shadow setup runs after the camera cull pass.
 	Vector<Instance *> lights_with_shadow;
 	// </ELIM>
 	// directional lights
