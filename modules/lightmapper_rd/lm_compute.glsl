@@ -508,6 +508,41 @@ float randomize(inout uint value) {
 	return float(value / 4294967296.0);
 }
 
+// <ELIM> The light accumulators are RGBA16F and are read-modify-written once per
+// batch. The store's float->half conversion truncates, so each batch lost part of
+// an ulp and the bake darkened with the batch count, which follows GPU speed.
+// Stochastic rounding picks one of the two halves around v with the probability
+// that makes the expected stored value exactly v, at any batch count.
+
+// The half next to bit pattern p_h toward larger (or smaller) values.
+uint lm_half_step(uint p_h, bool p_larger) {
+	const bool negative = (p_h & 0x8000u) != 0u;
+	if (p_larger != negative) {
+		return p_h + 1u;
+	}
+	if ((p_h & 0x7FFFu) == 0u) {
+		return (p_h ^ 0x8000u) | 1u; // Across zero.
+	}
+	return p_h - 1u;
+}
+
+float lm_round_half(float p_v, float p_u) {
+	const uint h = packHalf2x16(vec2(p_v, 0.0)) & 0xFFFFu;
+	const float a = unpackHalf2x16(h).x;
+	if (a == p_v || isinf(a) || isnan(a)) {
+		return a;
+	}
+	const float b = unpackHalf2x16(lm_half_step(h, p_v > a)).x;
+	return p_u < (p_v - a) / (b - a) ? b : a;
+}
+
+// p_v.rgb rounded for an RGBA16F store, alpha kept. p_seed must differ per texel
+// and per store, so rounding errors do not correlate across batches.
+vec4 lm_round_half_rgb(vec4 p_v, uint p_seed) {
+	return vec4(lm_round_half(p_v.r, randomize(p_seed)), lm_round_half(p_v.g, randomize(p_seed)), lm_round_half(p_v.b, randomize(p_seed)), p_v.a);
+}
+// </ELIM>
+
 const float PI = 3.14159265f;
 
 // http://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.4.pdf (chapter 15)
@@ -1509,13 +1544,15 @@ void main() {
 	// </ELIM>
 
 	light_for_bounces *= bake_params.exposure_normalization;
-	// <ELIM> Batch-accumulate into dest_light (the bounce source).
+	// <ELIM> Batch-accumulate into dest_light (the bounce source), rounded so the sum
+	// does not depend on the batch count. Each store gets its own rounding seed.
 	// imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_bounces, 1.0));
+	const uint round_seed = random_seed(ivec3(atlas_pos, 0x10000000 + int(params.light_from) * 8));
 	if (first_light_batch) {
-		imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_bounces, 1.0));
+		imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), lm_round_half_rgb(vec4(light_for_bounces, 1.0), round_seed));
 	} else {
 		vec3 prev_bounces = imageLoad(dest_light, ivec3(atlas_pos, params.atlas_slice)).rgb;
-		imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), vec4(prev_bounces + light_for_bounces, 1.0));
+		imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), lm_round_half_rgb(vec4(prev_bounces + light_for_bounces, 1.0), round_seed));
 	}
 	// </ELIM>
 
@@ -1529,10 +1566,10 @@ void main() {
 	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 3), sh_accum[3]);
 	for (int sh_i = 0; sh_i < 4; sh_i++) {
 		if (first_light_batch) {
-			imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + sh_i), sh_accum[sh_i]);
+			imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + sh_i), lm_round_half_rgb(sh_accum[sh_i], round_seed + 1u + uint(sh_i)));
 		} else {
 			vec3 prev_sh = imageLoad(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + sh_i)).rgb;
-			imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + sh_i), vec4(prev_sh + sh_accum[sh_i].rgb, 1.0));
+			imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + sh_i), lm_round_half_rgb(vec4(prev_sh + sh_accum[sh_i].rgb, 1.0), round_seed + 1u + uint(sh_i)));
 		}
 	}
 	// </ELIM>
@@ -1541,10 +1578,10 @@ void main() {
 	// <ELIM> Batch-accumulate the final direct-light texture (see dest_light above).
 	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_texture, 1.0));
 	if (first_light_batch) {
-		imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_texture, 1.0));
+		imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), lm_round_half_rgb(vec4(light_for_texture, 1.0), round_seed + 1u));
 	} else {
 		vec3 prev_tex = imageLoad(accum_light, ivec3(atlas_pos, params.atlas_slice)).rgb;
-		imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), vec4(prev_tex + light_for_texture, 1.0));
+		imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), lm_round_half_rgb(vec4(prev_tex + light_for_texture, 1.0), round_seed + 1u));
 	}
 	// </ELIM>
 #endif
@@ -1682,15 +1719,27 @@ void main() {
 
 	// Add the averaged result to the accumulated light texture.
 #ifdef USE_SH_LIGHTMAPS
+	// <ELIM> Rounded like the direct pass's stores (see lm_round_half).
+	const uint round_seed = random_seed(ivec3(atlas_pos, 0x20000000 + int(params.ray_from) * 8));
+	// </ELIM>
 	for (int i = 0; i < 4; i++) {
 		vec4 accum = imageLoad(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + i));
 		accum.rgb += sh_accum[i].rgb / float(params.ray_count);
-		imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + i), accum);
+		// <ELIM>
+		// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + i), accum);
+		imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + i), lm_round_half_rgb(accum, round_seed + uint(i)));
+		// </ELIM>
 	}
 #else
+	// <ELIM>
+	const uint round_seed = random_seed(ivec3(atlas_pos, 0x20000000 + int(params.ray_from) * 8));
+	// </ELIM>
 	vec4 accum = imageLoad(accum_light, ivec3(atlas_pos, params.atlas_slice));
 	accum.rgb += light_accum / float(params.ray_count);
-	imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), accum);
+	// <ELIM>
+	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), accum);
+	imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice), lm_round_half_rgb(accum, round_seed));
+	// </ELIM>
 #endif
 
 	// <ELIM> An 8-bit running fraction would lose up to half a step per batch, which
