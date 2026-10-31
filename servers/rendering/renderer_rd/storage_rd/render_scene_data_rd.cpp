@@ -205,7 +205,7 @@ void RenderSceneDataRD::update_ubo(RID p_uniform_buffer, RS::ViewportDebugDraw p
 			RendererRD::MaterialStorage::store_transform_3x3(sky_transform, ubo.radiance_inverse_xform);
 		}
 
-		// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+		// <ELIM> Lightmap specular occlusion reference.
 		ubo.reflection_lightmap_occlusion_reference = render_scene_render->environment_get_reflection_lightmap_occlusion_reference(p_env);
 		// </ELIM>
 

@@ -183,7 +183,7 @@ public:
 	virtual float environment_get_ambient_sky_contribution(RID p_env) const = 0;
 	virtual RS::EnvironmentReflectionSource environment_get_reflection_source(RID p_env) const = 0;
 
-	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	// <ELIM> Lightmap specular occlusion reference.
 	virtual void environment_set_reflection_lightmap_occlusion_reference(RID p_env, float p_reference) = 0;
 	// </ELIM>
 

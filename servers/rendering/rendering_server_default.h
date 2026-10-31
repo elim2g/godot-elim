@@ -822,7 +822,7 @@ public:
 	FUNC3(environment_set_bg_energy, RID, float, float)
 	FUNC2(environment_set_canvas_max_layer, RID, int)
 	FUNC6(environment_set_ambient_light, RID, const Color &, EnvironmentAmbientSource, float, float, EnvironmentReflectionSource)
-	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	// <ELIM> Lightmap specular occlusion reference.
 	FUNC2(environment_set_reflection_lightmap_occlusion_reference, RID, float)
 	// </ELIM>
 

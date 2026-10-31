@@ -1256,7 +1256,7 @@ public:
 	PASS1RC(float, environment_get_ambient_light_energy, RID)
 	PASS1RC(float, environment_get_ambient_sky_contribution, RID)
 	PASS1RC(RS::EnvironmentReflectionSource, environment_get_reflection_source, RID)
-	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	// <ELIM> Lightmap specular occlusion reference.
 	PASS2(environment_set_reflection_lightmap_occlusion_reference, RID, float)
 	// </ELIM>
 

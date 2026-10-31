@@ -197,7 +197,7 @@ void Environment::_update_ambient_light() {
 			ambient_sky_contribution, RS::EnvironmentReflectionSource(reflection_source));
 }
 
-// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+// <ELIM> Lightmap specular occlusion reference.
 void Environment::set_reflection_lightmap_occlusion_reference(float p_reference) {
 	reflection_lightmap_occlusion_reference = MAX(0.0, p_reference);
 	_update_reflection_lightmap_occlusion_reference();
@@ -1276,7 +1276,7 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_ambient_light_sky_contribution"), &Environment::get_ambient_light_sky_contribution);
 	ClassDB::bind_method(D_METHOD("set_reflection_source", "source"), &Environment::set_reflection_source);
 	ClassDB::bind_method(D_METHOD("get_reflection_source"), &Environment::get_reflection_source);
-	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	// <ELIM> Lightmap specular occlusion reference.
 	ClassDB::bind_method(D_METHOD("set_reflection_lightmap_occlusion_reference", "reference"), &Environment::set_reflection_lightmap_occlusion_reference);
 	ClassDB::bind_method(D_METHOD("get_reflection_lightmap_occlusion_reference"), &Environment::get_reflection_lightmap_occlusion_reference);
 	// </ELIM>
@@ -1289,7 +1289,7 @@ void Environment::_bind_methods() {
 
 	ADD_GROUP("Reflected Light", "reflected_light_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "reflected_light_source", PROPERTY_HINT_ENUM, "Background,Disabled,Sky"), "set_reflection_source", "get_reflection_source");
-	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork). 0 = off.
+	// <ELIM> Lightmap specular occlusion reference. 0 = off.
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "reflection_lightmap_occlusion_reference", PROPERTY_HINT_RANGE, "0,16,0.001"), "set_reflection_lightmap_occlusion_reference", "get_reflection_lightmap_occlusion_reference");
 	// </ELIM>
 

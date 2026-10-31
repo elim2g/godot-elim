@@ -80,7 +80,7 @@ private:
 		float ambient_light_energy = 1.0;
 		float ambient_sky_contribution = 1.0;
 		RS::EnvironmentReflectionSource reflection_source = RS::ENV_REFLECTION_SOURCE_BG;
-		// <ELIM> Phase-2 lightmap specular occlusion: reference luminance the baked
+		// <ELIM> Lightmap specular occlusion: reference luminance the baked
 		// DC radiance is divided by to occlude sky-cubemap ambient specular.
 		// 0.0 = feature off (upstream-identical rendering).
 		float reflection_lightmap_occlusion_reference = 0.0;
@@ -227,7 +227,7 @@ public:
 	float environment_get_ambient_light_energy(RID p_env) const;
 	float environment_get_ambient_sky_contribution(RID p_env) const;
 	RS::EnvironmentReflectionSource environment_get_reflection_source(RID p_env) const;
-	// <ELIM> Phase-2 lightmap specular occlusion reference (TURNT fork).
+	// <ELIM> Lightmap specular occlusion reference.
 	void environment_set_reflection_lightmap_occlusion_reference(RID p_env, float p_reference);
 	float environment_get_reflection_lightmap_occlusion_reference(RID p_env) const;
 	// </ELIM>

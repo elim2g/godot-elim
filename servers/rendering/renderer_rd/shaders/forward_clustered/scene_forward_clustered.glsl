@@ -1814,12 +1814,10 @@ void fragment_shader(in SceneData scene_data) {
 	indirect_specular_light = mix(indirect_specular_light, custom_radiance.rgb, custom_radiance.a);
 #endif
 
-	// <ELIM> Scene-ambient computed for BOTH variants (upstream computed it only in
-	// the #ifndef USE_LIGHTMAP path, writing ambient_light directly). Non-lightmapped
-	// surfaces still take it as their ambient below; lightmapped surfaces add it as a
-	// dimmed FILL after the lightmap sample (the additive fill further down). When the
-	// ambient source is DISABLED the USE_AMBIENT_LIGHT flag is unset, so scene_ambient
-	// stays 0 and the lightmap path is byte-identical to upstream.
+	// <ELIM> Scene ambient computed for both variants (upstream only without
+	// USE_LIGHTMAP). Non-lightmapped surfaces take it as their ambient; lightmapped
+	// ones add it as a fill after the lightmap sample. With the ambient source
+	// DISABLED scene_ambient stays 0 and the lightmap path matches upstream.
 	vec3 scene_ambient = vec3(0.0);
 	//lightmap overrides everything
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_LIGHT)) {
@@ -2012,13 +2010,10 @@ void fragment_shader(in SceneData scene_data) {
 	}
 	// </ELIM>
 
-	// <ELIM> Additive scene-ambient fill on lightmapped surfaces.
-	// Upstream Forward+ gates sky ambient behind #ifndef USE_LIGHTMAP, so baked walls
-	// never saw the runtime ambient term; this adds it on top of the lightmap sample.
-	// scene_ambient is 0 when the ambient source is DISABLED (neutral for upstream and
-	// the GLES3-baked fallback). Placed AFTER the DC-based occlusion above (so the
-	// specular factor reads pre-fill lightmap DC) and BEFORE ambient_light *= ao (so
-	// SSAO shapes the fill).
+	// <ELIM> Additive scene-ambient fill on lightmapped surfaces, which upstream
+	// Forward+ never gives the runtime ambient term. After the DC-based occlusion
+	// above (the specular factor reads pre-fill DC) and before ambient_light *= ao
+	// (so SSAO shapes the fill). 0 when the ambient source is DISABLED.
 	ambient_light += scene_ambient;
 	// </ELIM>
 #else
@@ -2459,13 +2454,10 @@ void fragment_shader(in SceneData scene_data) {
 					continue; //not masked
 				}
 
-				// <ELIM> Baked-map directional specular: the specular-only path in the
-				// shading loop needs a real per-light visibility term, so let this light
-				// through the shadow pass rather than skipping it outright - otherwise
-				// shadow0/shadow1 hold nothing for it and the highlight ignores geometry
-				// (sun specular straight through a roof). Vertex lighting keeps the
-				// upstream skip: its shadow application multiplies diffuse_light, which
-				// would wrongly dim other lights' baked contribution.
+				// <ELIM> Baked-map directional specular needs this light's real shadow,
+				// or its highlight passes through roofs, so it is not skipped here.
+				// Vertex lighting keeps the upstream skip: its shadow multiplies
+				// diffuse_light, which would dim other lights' baked contribution.
 				// if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 				// 	continue; // Statically baked light and object uses lightmap, skip
 				// }
@@ -2718,23 +2710,12 @@ void fragment_shader(in SceneData scene_data) {
 				continue; //not masked
 			}
 
-			// <ELIM> Baked-map directional specular.
-			// Upstream skips a statically baked light on lightmapped geometry outright.
-			// The diffuse half of that skip is correct - the lightmap already holds it -
-			// but it also discards the specular, which is why baked maps read flat: no
-			// highlight ever moves with the viewer. Keep the diffuse skip (restored after
-			// light_compute below) and let the specular through.
-			//
-			// Occlusion comes from the light's own shadow map (the shadow pass above no
-			// longer skips this light), so a roof blocks the highlight the same way it
-			// blocks the light. lm_direct_spec_occ is kept only as a secondary multiplier
-			// on top of that - it defends the far field, where the cascade has faded to
-			// unshadowed and the bake is the only remaining evidence of enclosure.
-			//
-			// Requires real per-light visibility to exist at all: no shadow map (shadows
-			// disabled, or shadow_opacity 0 because the light casts none) means falling
-			// back to the upstream skip rather than guessing. Per-light opt-out is the
-			// existing DirectionalLight3D.light_specular (0 = upstream).
+			// <ELIM> Baked-map directional specular. Upstream skips a statically baked
+			// light on lightmapped geometry, losing its specular too, so baked maps read
+			// flat. The diffuse skip is kept (restored after light_compute below); the
+			// specular is occluded by the light's own shadow map, with lm_direct_spec_occ
+			// on top for the far field where the cascade has faded. Without a shadow map
+			// it falls back to the upstream skip. Opt-out: light_specular = 0.
 			//
 			// if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 			// 	continue; // Statically baked light and object uses lightmap, skip
@@ -2838,8 +2819,8 @@ void fragment_shader(in SceneData scene_data) {
 			blur_shadow(shadow);
 
 			// <ELIM> Baked-map directional specular: `shadow` is this light's real cascade
-			// value (the shadow pass no longer skips it), which is what stops the highlight
-			// passing through roofs. The baked factor multiplies on top - beyond
+			// value, which stops the highlight passing through roofs. The baked factor
+			// multiplies on top - beyond
 			// directional_shadow_max_distance the cascade fades to unshadowed and the
 			// lightmap becomes the only evidence that a surface is enclosed. A baked mask
 			// has no far field to defend, so it skips the factor.
