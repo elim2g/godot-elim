@@ -325,6 +325,13 @@ class LightmapperRD : public Lightmapper {
 		// </ELIM>
 	};
 
+	// <ELIM> RD rounds a shader's push-constant range up to a 16-byte multiple and
+	// rejects a struct of any other size, which only a real GPU run reveals.
+	static_assert(sizeof(RasterPushConstant) % 16 == 0, "RasterPushConstant must be a multiple of 16 bytes.");
+	static_assert(sizeof(RasterSeamsPushConstant) % 16 == 0, "RasterSeamsPushConstant must be a multiple of 16 bytes.");
+	static_assert(sizeof(PushConstant) % 16 == 0, "PushConstant must be a multiple of 16 bytes.");
+	// </ELIM>
+
 	Vector<Ref<Image>> lightmap_textures;
 	Vector<Ref<Image>> shadowmask_textures;
 	// <ELIM> shadowmask_textures holds emitter-arc layer pairs (see get_emitter_arcs).

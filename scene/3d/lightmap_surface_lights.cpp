@@ -1121,7 +1121,7 @@ void LightmapSurfaceLights::collect(const Vector<SurfaceLightMeshInput> &p_input
 
 	// Diagnostics (bake only; the debug hook may run per-frame so it stays quiet).
 	if (!p_capture_geometry) {
-		print_line(vformat("LightmapGI: surface-light collector — %d island light(s), total emissive area %.1f m^2, %d polygon vert(s), %d hull-fallback island(s), %d occluded island(s) culled.",
+		print_line(vformat("LightmapGI: surface-light collector: %d island light(s), total emissive area %.1f m^2, %d polygon vert(s), %d hull-fallback island(s), %d occluded island(s) culled.",
 				(int)r_islands.size(), total_area, (int)total_poly_verts, (int)hull_fallback_islands, (int)occluded_islands));
 		// <ELIM> Emitter fixtures (islands grouped for emitter-arc selection).
 		HashSet<int32_t> fixtures;
@@ -1136,19 +1136,19 @@ void LightmapSurfaceLights::collect(const Vector<SurfaceLightMeshInput> &p_input
 				multi_face++;
 			}
 		}
-		print_line(vformat("LightmapGI: emitter fixtures — %d island(s) in %d fixture(s), %d of them with more than one island.", (int)r_islands.size(), fixtures.size(), multi_face));
+		print_line(vformat("LightmapGI: emitter fixtures: %d island(s) in %d fixture(s), %d of them with more than one island.", (int)r_islands.size(), fixtures.size(), multi_face));
 		// </ELIM>
-		print_line(vformat("LightmapGI: surface-light simplification — %d non-convex island(s) rebuilt from their boundary (%d member tri(s) -> %d exact tri(s)), %d could not be rebuilt.",
+		print_line(vformat("LightmapGI: surface-light simplification: %d non-convex island(s) rebuilt from their boundary (%d member tri(s) -> %d exact tri(s)), %d could not be rebuilt.",
 				(int)simplified_islands, (int)simplified_tris_in, (int)simplified_tris_out, (int)simplify_failed_islands));
 		// <ELIM> Convex-merge rescue of the islands the boundary rebuild bailed on.
 		if (simplify_failed_islands > 0) {
-			print_line(vformat("LightmapGI: surface-light convex merge — %d of %d un-rebuildable island(s) merged into convex regions (%d member tri(s) -> %d fan tri(s)); %d still emit raw members.",
+			print_line(vformat("LightmapGI: surface-light convex merge: %d of %d un-rebuildable island(s) merged into convex regions (%d member tri(s) -> %d fan tri(s)); %d still emit raw members.",
 					(int)merged_islands, (int)simplify_failed_islands, (int)merged_tris_in, (int)merged_tris_out,
 					(int)(simplify_failed_islands - merged_islands)));
 		}
 		// </ELIM>
 		if (hull_fallback_islands > 0) {
-			WARN_PRINT(vformat("LightmapGI: %d emitter island(s) still exceed %d triangles after boundary simplification and fell back to their convex hull — power-conserving, but the light is smeared over non-emissive geometry and the emitter itself is dimmed by island_area/hull_area. Raise SURFACE_LIGHT_MAX_POLY_TRIS.", (int)hull_fallback_islands, (int)SURFACE_LIGHT_MAX_POLY_TRIS));
+			WARN_PRINT(vformat("LightmapGI: %d emitter island(s) still exceed %d triangles after boundary simplification and fell back to their convex hull - power-conserving, but the light is smeared over non-emissive geometry and the emitter itself is dimmed by island_area/hull_area. Raise SURFACE_LIGHT_MAX_POLY_TRIS.", (int)hull_fallback_islands, (int)SURFACE_LIGHT_MAX_POLY_TRIS));
 		}
 	}
 }
