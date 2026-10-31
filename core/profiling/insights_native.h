@@ -3,25 +3,15 @@
 /**************************************************************************/
 /* TURNT ADDITION -- not upstream Godot.                                  */
 /*                                                                        */
-/* The bridge libturnt uses to emit into an Insights capture.             */
+/* The bridge libturnt uses to emit into an Insights capture: a           */
+/* GDExtension interface function (tnt_insights_get_api_v1) libturnt      */
+/* resolves once via get_proc_address, so no Variant marshalling or       */
+/* ClassDB lookup. Registered in every build (a build without the backend */
+/* returns `available == 0`): an unknown name would ERR_FAIL on launch.   */
 /*                                                                        */
-/* The engine registers tnt_insights_get_api_v1 as a GDExtension          */
-/* interface function (see GDExtension::initialize_gdextensions), and     */
-/* libturnt resolves it once at startup via get_proc_address. That route  */
-/* costs no Variant marshalling, no ClassDB lookup, and works at any      */
-/* initialization level.                                                  */
-/*                                                                        */
-/* Registration is UNCONDITIONAL -- a build without the backend still     */
-/* registers this and returns a table with `available == 0`. Registering  */
-/* conditionally would make every launch of a template build print an     */
-/* error, because GDExtension::get_interface_function ERR_FAILs on an     */
-/* unknown name.                                                          */
-/*                                                                        */
-/* libturnt keeps a byte-for-byte copy of this struct at                  */
-/* libturnt/src/insights/tnt_insights_native_api.h. If you change the     */
-/* layout, bump STRUCT_VERSION in both -- the client refuses to bind to a */
-/* version it does not recognise, which turns an ABI mismatch into a      */
-/* silent no-op instead of a crash.                                       */
+/* libturnt/src/insights/tnt_insights_native_api.h is a byte-for-byte     */
+/* copy. Change the layout and bump STRUCT_VERSION in both: the client    */
+/* refuses an unknown version, so a mismatch is a no-op, not a crash.     */
 /**************************************************************************/
 
 #pragma once

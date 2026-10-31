@@ -240,7 +240,7 @@ bool TntInsights::gpu_marker_allowed(const String &p_name) {
 	// than every dispatch in the renderer. A flat marker's span runs until the
 	// next recorded marker, so every pass that can cost real time must be kept:
 	// a dropped marker silently folds its pass into whichever kept pass
-	// preceded it (SSIL used to land inside "Process SSAO").
+	// preceded it (SSIL would land inside "Process SSAO").
 	static const char *kept[] = {
 		"Frame Begin",
 		"Prepare Render Frame",

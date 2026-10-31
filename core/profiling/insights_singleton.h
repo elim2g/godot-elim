@@ -3,14 +3,10 @@
 /**************************************************************************/
 /* TURNT ADDITION -- not upstream Godot.                                  */
 /*                                                                        */
-/* Script-facing control surface for TURNT Insights captures.             */
-/*                                                                        */
-/* This class is compiled into EVERY build, including export templates    */
-/* that were built without `profiler=turnt`. The turnt/ GDScript project  */
-/* is shared between the editor and the exported game, so                 */
-/* `TntInsights.start_capture(...)` has to resolve and quietly do nothing */
-/* rather than fail to parse. Ask is_available() to find out which you    */
-/* are talking to.                                                        */
+/* Script-facing control surface for TURNT Insights captures. Compiled    */
+/* into every build, including templates without `profiler=turnt`, so the */
+/* shared GDScript resolves TntInsights and it quietly does nothing;      */
+/* is_available() says which build this is.                               */
 /*                                                                        */
 /* Deliberately does not include core/profiling/profiling.h -- that would */
 /* couple every consumer of this header to the profiler build option.     */
