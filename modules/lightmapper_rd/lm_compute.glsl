@@ -55,8 +55,8 @@ layout(rgba32f, set = 1, binding = 1) uniform restrict image2DArray unocclude;
 
 #if defined(MODE_DIRECT_LIGHT) || defined(MODE_BOUNCE_LIGHT)
 
-// <ELIM> Dropped `writeonly`: the direct pass now reads-modifies-writes this
-// image to accumulate across light batches (TDR guard, see MODE_DIRECT_LIGHT).
+// <ELIM> Not `writeonly`: the direct pass read-modify-writes this image across
+// light batches (TDR guard).
 // layout(rgba16f, set = 1, binding = 0) uniform restrict writeonly image2DArray dest_light;
 layout(rgba16f, set = 1, binding = 0) uniform restrict image2DArray dest_light;
 // </ELIM>
@@ -157,12 +157,8 @@ layout(push_constant, std430) uniform Params {
 	uint ray_from;
 	uint ray_to;
 
-	// <ELIM> Direct-pass light-batch range (TDR guard); must match the C++
-	// PushConstant in lightmapper_rd.h. MODE_DIRECT_LIGHT iterates the per-texel
-	// light loop over [light_from, light_to) instead of all lights at once, so a
-	// single dispatch's O(texels*lights*rays) cost cannot exceed the GPU driver
-	// watchdog window. One batch (light_from==0, light_to==light_count) is
-	// bit-identical to the original single pass.
+	// <ELIM> The direct pass's light batch [light_from, light_to) (TDR guard); must
+	// match PushConstant in lightmapper_rd.h.
 	uint light_from;
 	uint light_to;
 	// </ELIM>
@@ -171,9 +167,8 @@ layout(push_constant, std430) uniform Params {
 	uint probe_count;
 	uint denoiser_range;
 
-	// <ELIM> Visibility rays per texel for analytic area-poly surface lights.
-	// Occupies what was C++-side padding; keeps the declared block at 48 bytes,
-	// matching sizeof(PushConstant) in lightmapper_rd.h.
+	// <ELIM> Visibility rays per texel for analytic area-poly surface lights. The
+	// block must stay 48 bytes, matching sizeof(PushConstant) in lightmapper_rd.h.
 	uint surface_light_vis_rays;
 	uint pad0;
 	// </ELIM>
@@ -220,9 +215,8 @@ bool ray_box_test(vec3 p_from, vec3 p_inv_dir, vec3 p_box_min, vec3 p_box_max) {
 #define CLUSTER_TRIANGLE_ITERATION
 #endif
 
-// <ELIM> Added p_skip_sky: lets a directional-sun shadow ray treat a Q3 sky face as
-// reached-light (the sun seen through the aperture) rather than an occluder. The name
-// is historical (it used to skip/pass-through sky); see the closest-hit sky logic below.
+// <ELIM> p_skip_sky: a directional-sun shadow ray treats a Q3 sky face as reached
+// light (the sun seen through the aperture) rather than an occluder.
 // uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out vec3 r_normal, out uint r_triangle, out vec3 r_barycentric) {
 uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out float r_distance, out vec3 r_normal, out uint r_triangle, out vec3 r_barycentric) {
 // </ELIM>
@@ -307,17 +301,11 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out floa
 							uint triangle_index = triangle_indices.data[cluster_triangle_index];
 							Triangle triangle = triangles.data[triangle_index];
 
-							// <ELIM> Q3-style sky faces are the sun's "window". For a
-							// directional-sun shadow query (p_skip_sky; name is historical),
-							// a sky face is NOT an occluder but REACHED-LIGHT: if the closest
-							// thing along the ray to the sun is a sky face, the texel sees the
-							// sun through the aperture and is LIT (a nearer SOLID face still
-							// shadows). So do NOT skip it here — let it compete in the
-							// closest-hit search, tag it (best_is_sky), and convert
-							// "closest hit == sky" into a miss after the cell (this
-							// p_any_hit == false path is closest-first). Only any-hit queries
-							// (never combined with p_skip_sky today) still skip sky, so they
-							// don't count it as an occluder.
+							// <ELIM> For a sun shadow query (p_skip_sky) a sky face is reached
+							// light, not an occluder, but a nearer solid face still shadows. So
+							// it competes in the closest-hit search, is tagged (best_is_sky),
+							// and "closest hit == sky" becomes a miss after the cell. Any-hit
+							// queries still skip sky so it never counts as an occluder.
 							bool tri_is_sky = p_skip_sky && (triangle.surface_flags & SURFACE_FLAG_SKY) != 0u;
 							if (tri_is_sky && p_any_hit) {
 								continue;
@@ -340,8 +328,8 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out floa
 								vec3 position = p_from + dir * distance;
 								// <ELIM> Clamp the hit cell into the grid. Faces lying exactly on
 								// the scene AABB's max planes (every map's outer shell) compute a
-								// hit_cell of grid_size — outside the grid, never equal to any
-								// traversal cell — so upstream silently ignores ALL hits on them
+								// hit_cell of grid_size - outside the grid, never equal to any
+								// traversal cell - so upstream silently ignores ALL hits on them
 								// and rays escape through the map's roof/outer walls.
 								ivec3 hit_cell = clamp(ivec3((position - bake_params.to_cell_offset) * bake_params.to_cell_size), ivec3(0), ivec3(bake_params.grid_size) - ivec3(1));
 								if (icell != hit_cell) {
@@ -373,7 +361,7 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, bool p_skip_sky, out floa
 									hit = backface ? RAY_BACK : RAY_FRONT;
 									best_distance = distance;
 									// <ELIM> Is this closest-so-far hit a sky aperture?
-									// (registers regardless of the sky face's facing —
+									// (registers regardless of the sky face's facing  -
 									// ray_hits_triangle / the cull_mode switch never discard
 									// the hit, so sky orientation does not matter.)
 									best_is_sky = tri_is_sky;
@@ -456,10 +444,8 @@ uint trace_ray_closest_hit_triangle_albedo_alpha(vec3 p_from, vec3 p_to, bool p_
 		Vertex vert1 = vertices.data[triangles.data[tidx].indices.y];
 		Vertex vert2 = vertices.data[triangles.data[tidx].indices.z];
 
-		// <ELIM> Trace-only faces (sky or not) own no atlas chart: their sentinel
-		// slice == atlas_slices is OOB for the albedo atlas, so resolve them here
-		// without a textureLod — opaque black (a=1 seals the bake; albedo 0 tints
-		// no light, and a=1 fully occludes so the tint is zeroed regardless). Sun
+		// <ELIM> Trace-only faces own no atlas chart (their sentinel slice is out of
+		// range for the albedo atlas), so they resolve here to opaque black. Sun
 		// shadows already skip sky via p_skip_sky; omni/spot treat sky as opaque.
 		{
 			uint trace_only_flags = triangles.data[tidx].surface_flags;
@@ -474,12 +460,9 @@ uint trace_ray_closest_hit_triangle_albedo_alpha(vec3 p_from, vec3 p_to, bool p_
 		vec3 uvw = vec3(barycentric.x * vert0.uv + barycentric.y * vert1.uv + barycentric.z * vert2.uv, float(triangles.data[tidx].slice));
 
 		albedo_alpha = textureLod(sampler2DArray(albedo_tex, linear_sampler), uvw, 0);
-		// <ELIM> TURNT bakes no transparent surfaces (CLEAR "windows" are faces
-		// removed from the mesh), so every hit is opaque. Without this, hits
-		// near a chart edge bilinearly mix the gutter's alpha=0 into the
-		// sample, fabricating a translucent border around EVERY face — texels
-		// are meters wide here, so the sun partially shines through a band at
-		// every brush seam ("light bleeding everywhere").
+		// <ELIM> TURNT bakes no transparent surfaces, so every hit is opaque. A hit
+		// near a chart edge would otherwise mix the gutter's alpha 0 into the sample,
+		// and with meter-wide texels the sun shines through a band at every seam.
 		albedo_alpha.a = 1.0;
 		// </ELIM>
 		hit_position = barycentric.x * vert0.position + barycentric.y * vert1.position + barycentric.z * vert2.position;
@@ -599,7 +582,7 @@ vec2 get_vogel_disk(float p_i, float p_rotation, float p_sample_count_sqrt) {
 // loops in trace_direct_light): 1.0 = fully visible, 0.0 = blocked; a
 // transparent hit multiplies the scalar by (1 - alpha) and tints r_color, an
 // opaque hit zeroes it. r_color starts at the light colour and carries tint
-// ONLY — the scalar carries all transmittance, exactly like penumbra vs
+// ONLY - the scalar carries all transmittance, exactly like penumbra vs
 // penumbra_color in the punctual paths.
 float trace_shadow_transmittance(vec3 p_origin, vec3 p_target, bool p_skip_sky, vec3 p_light_color, out vec3 r_color) {
 	const float EPSILON = 0.00001;
@@ -637,13 +620,7 @@ float trace_shadow_transmittance(vec3 p_origin, vec3 p_target, bool p_skip_sky, 
 }
 // </ELIM>
 
-// <ELIM> One triangle's contribution to the analytic irradiance vector: horizon
-// clip against the receiver's tangent plane, then the spherical edge sum.
-// Factored out of trace_direct_light because the visibility pass needs each
-// triangle's contribution SEPARATELY. Recomputed rather than stored: an island
-// can carry hundreds of triangles and there is no per-triangle scratch, and
-// recomputing keeps the two passes provably identical.
-// Horizon-clips one polygon triangle against the receiver tangent plane and
+// <ELIM> Horizon-clips one polygon triangle against the receiver tangent plane and
 // returns its corners as unit directions from p_position (count < 3: nothing
 // above the horizon). Shared by the irradiance and emitter-arc paths.
 int surface_light_tri_clip(uint p_base, uint p_tri, vec3 p_position, vec3 p_normal, out vec3 r_clipped[4]) {
@@ -703,6 +680,9 @@ vec3 surface_light_edge_sum(vec3 p_clipped[4], int p_count) {
 	return e;
 }
 
+// One triangle's contribution to the analytic irradiance vector. The visibility
+// pass needs each triangle's share separately; it is recomputed, not stored, since
+// an island can carry hundreds of triangles and there is no per-triangle scratch.
 vec3 surface_light_tri_irradiance(uint p_base, uint p_tri, vec3 p_position, vec3 p_normal) {
 	vec3 clipped[4];
 	int clipped_count = surface_light_tri_clip(p_base, p_tri, p_position, p_normal, clipped);
@@ -852,15 +832,10 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 		attenuation = 1.0;
 		soft_shadowing_disk_size = light_data.size;
 	// <ELIM> Analytic polygonal surface light: exact Lambert/Baum edge-sum
-	// irradiance from the island polygon (poly_verts triangle triples,
-	// referenced by pad = first vec4 index and cos_spot_angle = bit-cast tri
-	// count), scaled by a CONTRIBUTION-WEIGHTED visibility estimate (PASS 2).
-	// Replaces the centroid-patch approximation: exact at any distance (no
-	// near-field bright spots) and one light per island instead of one per
-	// patch. The block is fully self-contained and returns — the shared cos_r
-	// multiply below must NOT run (the edge sum already contains the receiver
-	// cosine), and the Vogel-disk penumbra machinery is meaningless for a
-	// polygon.
+	// irradiance from the island polygon, scaled by a contribution-weighted
+	// visibility estimate (PASS 2). Exact at any distance. The block returns on its
+	// own: the shared cos_r multiply below must not run (the edge sum already holds
+	// the receiver cosine), and the Vogel-disk penumbra is meaningless for a polygon.
 	} else if (light_data.type == LIGHT_TYPE_AREA_POLY) {
 		if (distance(p_position, light_data.position) > light_data.range) {
 			// Energy-derived cutoff (range includes the island bounding radius).
@@ -877,10 +852,9 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 			return;
 		}
 
-		// PASS 1: exact unoccluded irradiance. irr_pos additionally accumulates
-		// each triangle's OWN clamped contribution — the measure PASS 2 hands its
-		// rays out over. It is tracked separately from poly_irr because a
-		// numerically negative triangle must not shrink the sampling budget.
+		// PASS 1: exact unoccluded irradiance. irr_pos accumulates each triangle's own
+		// clamped contribution, the measure PASS 2 hands its rays out over; it is kept
+		// apart from poly_irr so a numerically negative triangle cannot shrink it.
 		vec3 e_vec = vec3(0.0);
 		float irr_pos = 0.0;
 		for (uint t = 0u; t < poly_tri_count; t++) {
@@ -1010,13 +984,10 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 	arc_spec_scale = 1.0 / max(dot(p_normal, r_light_dir), 0.01);
 #endif
 
-	// <ELIM> The AA/penumbra sampling below jitters ray origins across the
-	// texel footprint and advances them along the ray by bias + |disk_sample|.
-	// That is sized for cm-scale texels; TURNT texels are meters, so an
-	// un-capped jitter relocates origins through walls/ceilings and the sun
-	// lights sealed interiors (one-texel bleed bands at every corner the sun
-	// grazes). Cap the jitter in world units; below the cap behavior is
-	// identical to upstream.
+	// <ELIM> The AA/penumbra sampling jitters ray origins across the texel footprint,
+	// sized for cm-scale texels. TURNT texels are meters, so uncapped jitter moves
+	// origins through walls and the sun lights sealed interiors. Capped in world
+	// units; below the cap this matches upstream.
 	const float MAX_AA_JITTER_WS = 0.05;
 	float aa_texel_size = min(p_texel_size, MAX_AA_JITTER_WS);
 	// </ELIM>
@@ -1045,7 +1016,7 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 		float aa_power = 0.0;
 		for (uint i = 0; i < ray_count; i++) {
 			// Create a random sample within the texel.
-			// <ELIM> capped aa_texel_size (see above); was the unclamped p_texel_size.
+			// <ELIM> Capped aa_texel_size (see above).
 			// vec2 disk_sample = (halton_map[i] - vec2(0.5)) * p_texel_size * light_data.shadow_blur;
 			vec2 disk_sample = (halton_map[i] - vec2(0.5)) * aa_texel_size * light_data.shadow_blur;
 			// </ELIM>
@@ -1301,30 +1272,21 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 			vec3 emissive = textureLod(sampler2DArray(emission_tex, linear_sampler), uvw, 0).rgb;
 			emissive *= bake_params.exposure_normalization;
 
-			// <ELIM> Surface-light faces are integrated analytically as AREA_PATCH
-			// lights in trace_direct_light (at texels AND at bounce vertices), so
-			// adding their rasterized emission here would double-count. Albedo /
-			// throughput below still apply, so light bounced OFF the emitter keeps
-			// its tint, and direct_light above is still re-evaluated (that is where
-			// the emitter's indirect now comes from).
+			// <ELIM> Surface-light faces are integrated analytically as AREA_POLY lights
+			// (direct_light above), so their rasterized emission would double-count.
+			// Albedo and throughput still apply, so light bounced off the emitter keeps
+			// its tint.
 			// light += throughput * emissive * albedo_alpha.a;
 			if ((surface_flags & SURFACE_FLAG_SURFACE_LIGHT) == 0u) {
 				light += throughput * emissive * albedo_alpha.a;
 			}
 			// </ELIM>
 			throughput = mix(throughput, throughput * albedo_alpha.rgb, albedo_alpha.a);
-			// <ELIM> Bounce chroma boost (q3map2 -bouncecolorratio analogue). Applied to
-			// the indirect CONTRIBUTION rather than to albedo, so it amplifies chroma from
-			// BOTH the bouncing surface's colour and the source light's colour (an orange
-			// emitter spilling onto a grey wall carries its orange in direct_light, not in
-			// albedo — saturating albedo alone would not touch it).
-			//
-			// mix() toward the contribution's own luminance is luminance-PRESERVING for any
-			// s: lum(mix(vec3(l), c, s)) == l, since lum(vec3(l)) == l. So this changes only
-			// how colourful indirect is, never how bright the bake is. s = 1.0 is
-			// bit-identical to upstream. Clamped to [0,1] of the original luminance scale:
-			// s > 1 drives the weak channels negative, and a negative radiance would
-			// subtract light on the next bounce.
+			// <ELIM> Bounce chroma boost (q3map2 -bouncecolorratio analogue), applied to
+			// the indirect contribution rather than albedo so the source light's colour is
+			// boosted too. mix() toward its own luminance preserves luminance for any s;
+			// s = 1.0 matches upstream. Clamped at 0: s > 1 drives weak channels negative,
+			// and negative radiance would subtract light on the next bounce.
 			// light += throughput * direct_light * bake_params.bounce_indirect_energy * albedo_alpha.a;
 			vec3 indirect = throughput * direct_light;
 			if (bake_params.bounce_saturation != 1.0) {
@@ -1370,13 +1332,9 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 			// </ELIM>
 			break;
 		} else if (trace_result == RAY_BACK) {
-			// <ELIM> Opaque bake: a backface hit means the ray entered solid
-			// geometry — terminate. Upstream tests the hit's albedo alpha to
-			// support transparent surfaces, but that sample is gutter-
-			// contaminated near chart edges (bilinear mixes the gutter's
-			// alpha=0 in), letting rays continue straight through walls.
-			// TURNT bakes no transparent surfaces, so the upstream
-			// transparency continuation block is removed entirely.
+			// <ELIM> Opaque bake: a backface hit means the ray entered solid geometry, so
+			// it stops. Upstream's albedo-alpha test is gutter-contaminated near chart
+			// edges and lets rays continue through walls; TURNT bakes no transparency.
 			break;
 			// </ELIM>
 		}
@@ -1422,11 +1380,9 @@ void main() {
 	}
 	float texel_size_world_space = distance(position, neighbor_position.xyz) * bake_params.supersampling_factor;
 
-	// <ELIM> Light-batch accumulation (TDR guard): the first batch initializes the
-	// output images with imageStore (bit-identical to the original single pass);
-	// later batches read-modify-write to add their partial sum. Batches are
-	// serialized by submit()+sync() on the CPU side, so each batch sees the
-	// previous batch's stores.
+	// <ELIM> Light-batch accumulation (TDR guard): the first batch stores, later ones
+	// read-modify-write their partial sum. submit()+sync() between batches makes each
+	// see the previous batch's stores.
 	bool first_light_batch = (params.light_from == 0u);
 	// </ELIM>
 
@@ -1438,9 +1394,8 @@ void main() {
 #endif
 
 	// <ELIM> This batch's dominant emitter fixture: its summed specular intensity
-	// (radiance * solid angle * visibility), and the strongest of its lights, whose
-	// arc stands for it. The run is the fixture
-	// being summed (see the emitter-arc helpers).
+	// (radiance * solid angle * visibility) and its strongest light, whose arc stands
+	// for it. The run is the fixture being summed.
 #ifdef USE_EMITTER_ARCS
 	float arc_best_luma = 0.0;
 	float arc_second_luma = 0.0;
@@ -1554,9 +1509,7 @@ void main() {
 	// </ELIM>
 
 	light_for_bounces *= bake_params.exposure_normalization;
-	// <ELIM> Batch-accumulate into dest_light (the bounce source). The first light
-	// batch stores; later batches add their partial sum. A single batch is the
-	// original single imageStore, bit-identical.
+	// <ELIM> Batch-accumulate into dest_light (the bounce source).
 	// imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_bounces, 1.0));
 	if (first_light_batch) {
 		imageStore(dest_light, ivec3(atlas_pos, params.atlas_slice), vec4(light_for_bounces, 1.0));
@@ -1567,9 +1520,8 @@ void main() {
 	// </ELIM>
 
 #ifdef USE_SH_LIGHTMAPS
-	// <ELIM> Batch-accumulate the SH coefficients. sh_accum[k].a is always 1.0
-	// (only .rgb accumulates), so the stored alpha matches the original. A single
-	// batch reproduces the original four imageStores exactly.
+	// <ELIM> Batch-accumulate the SH coefficients. Only .rgb accumulates; alpha stays
+	// 1.0 as in the original stores.
 	// Keep for adding at the end.
 	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 0), sh_accum[0]);
 	// imageStore(accum_light, ivec3(atlas_pos, params.atlas_slice * 4 + 1), sh_accum[1]);
@@ -1598,9 +1550,8 @@ void main() {
 #endif
 
 #ifdef USE_SHADOWMASK
-	// <ELIM> Batch-accumulate the directional shadowmask with max() — the
-	// directional light lands in exactly one batch and other batches contribute
-	// 0, so max() over batches yields its shadow. Single batch == original store.
+	// <ELIM> Batch-accumulate the shadowmask with max(): the directional light lands
+	// in exactly one batch and the others contribute 0.
 	// imageStore(shadowmask, ivec3(atlas_pos, params.atlas_slice), vec4(shadowmask_value, shadowmask_value, shadowmask_value, 1.0));
 	float shadowmask_out = shadowmask_value;
 	if (!first_light_batch) {
@@ -1809,13 +1760,10 @@ void main() {
 		if (trace_ray_closest_hit_distance(base_pos, ray_to, d, norm) == RAY_BACK) {
 			unocclude_mask = 1.0;
 			if (d <= texel_size && d < min_d) {
-				// <ELIM> Buried texel: its sample point sits inside overlapping
-				// brush geometry (Quake-style maps never CSG-clip brushes, so
-				// faces continue beneath their neighbors). Upstream relocates
-				// the point out of the solid, which on thin outer shells often
-				// lands on the SUNLIT side and bleeds light across every seam
-				// via bilinear filtering. Kill the texel instead — the dilate
-				// pass fills it from its visible same-chart neighbors.
+				// <ELIM> Buried texel: its sample point sits inside overlapping brush
+				// geometry (Quake maps never CSG-clip brushes). Upstream relocates it out
+				// of the solid, which on thin outer shells often lands on the sunlit side
+				// and bleeds across the seam. Kill it; dilate fills it from neighbours.
 				position_alpha.a = 0.0;
 				min_d = d;
 				// </ELIM>

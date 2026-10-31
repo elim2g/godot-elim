@@ -42,7 +42,7 @@ struct SurfaceLightIslandLight {
 	// centroid distance test is conservative for texels near a big island's edge.
 	float bounding_radius = 0.0f;
 	// island_area / hull_area (< 1) when a non-convex island fell back to its
-	// hull fan past the tri cap — conserves emitted power over the larger hull.
+	// hull fan past the tri cap - conserves emitted power over the larger hull.
 	float radiance_scale = 1.0f;
 	// Debug-only REAL footprint geometry (pre-bias): the world-space triangles
 	// (3*N verts) this light integrates. Filled only when the collector runs
@@ -50,10 +50,9 @@ struct SurfaceLightIslandLight {
 	PackedVector3Array dbg_verts;
 };
 
-// One mesh handed to the shared surface-light collector. xform is mesh -> target
-// frame: the bake passes lightmapper-relative transforms (patches land where the
-// bake integrates them); the debug hook passes world transforms (patches land at
-// live world coordinates). overrides are the per-surface override materials.
+// One mesh handed to the surface-light collector. xform is mesh -> target frame:
+// lightmapper-relative for the bake, world for the debug hook. overrides are the
+// per-surface override materials.
 struct SurfaceLightSurfaceArrays {
 	Vector<Vector3> vertices;
 	Vector<Vector3> normals;

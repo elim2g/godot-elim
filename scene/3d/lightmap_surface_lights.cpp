@@ -14,38 +14,27 @@
 #include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
 
-// Analytic polygonal surface lights: surfaces whose effective material
-// carries the bool meta "tnt_surface_light" are merged into coplanar islands,
-// and each island becomes ONE LIGHT_TYPE_AREA_POLY light carrying its polygon
-// geometry — integrated in the direct pass with exact edge-sum irradiance and
-// ray-estimated visibility (no centroid discretization, no Monte Carlo blotch).
 static constexpr float SURFACE_LIGHT_MIN_AREA = 1e-4f; // Degenerate-sliver island cull.
-// Per-island triangle cap, applied to the island's SIMPLIFIED polygon (see
-// _surface_light_simplify_island) — not to the importer's raw fragment count.
-// Convex islands collapse to a hull fan of a handful of triangles; a non-convex
-// island is rebuilt from its boundary, which strips the T-junction slivers.
-// Past the cap an island falls back to its hull fan with radiance scaled by
-// island_area/hull_area: power-conserving but smeared, so a concave emitter
-// leaks onto non-emissive geometry and dims. The cap sits far above any real
-// face because the edge sum costs a few dozen flops per triangle and the
-// batcher's cost model charges each triangle explicitly.
+// Per-island triangle cap, applied to the simplified polygon. Past it an island
+// falls back to its hull fan with radiance scaled by island_area/hull_area:
+// power-conserving but smeared onto non-emissive geometry. It sits far above any
+// real face: the edge sum costs a few dozen flops per triangle, and the dispatch
+// cost model charges each triangle.
 static constexpr uint32_t SURFACE_LIGHT_MAX_POLY_TRIS = 1024;
-// Global polygon-vertex backstop against a pathological/misconfigured map
-// (e.g. a texture accidentally flagged emissive across the whole level)
-// exhausting VRAM. Past it, further emitter islands are dropped entirely (a
-// real, logged loss of light) — on a legitimate map, raise it rather than
-// accept the drop.
+// Map-wide polygon-vertex backstop against a misconfigured map (a texture flagged
+// emissive across the whole level) exhausting VRAM. Past it further islands are
+// dropped, with a warning; on a legitimate map, raise it.
 static constexpr uint32_t SURFACE_LIGHT_MAX_POLY_VERTS_TOTAL = 262144;
 // Convex-exactness tolerance: an island whose in-plane convex hull area is
 // within 1% of its member-triangle area IS its hull (the excess is weld/float
 // slop), so the hull fan reproduces it exactly with minimal triangles.
 static constexpr float SURFACE_LIGHT_HULL_TOLERANCE = 1.01f;
-// Lambertian radiance→irradiance normalization (the exitance of a diffuse
-// emitter of radiance L is πL; energies are authored as radiance).
+// Lambertian radiance -> irradiance normalization (the exitance of a diffuse
+// emitter of radiance L is pi*L; energies are authored as radiance).
 static constexpr float SURFACE_LIGHT_ENERGY_SCALE = 1.0f / (float)Math::PI;
 // Range-cull contribution threshold: the derived range solves the unshadowed
-// peak contribution E·A/d² = CUTOFF. Per-texel cost is bounded by island count
-// × visibility rays, so a large emitter may legitimately reach far.
+// peak contribution E*A/d^2 = CUTOFF. Per-texel cost is bounded by island count
+// x visibility rays, so a large emitter may legitimately reach far.
 static constexpr float SURFACE_LIGHT_CUTOFF = 0.005f;
 static constexpr float SURFACE_LIGHT_RANGE_MAX = 512.0f;
 // <ELIM> Coplanar-contact occlusion is an AREA fraction over an island's member
@@ -55,34 +44,21 @@ static constexpr float SURFACE_LIGHT_RANGE_MAX = 512.0f;
 static constexpr float SURFACE_LIGHT_OCC_CULL_FRACTION = 0.98f;
 static constexpr uint32_t SURFACE_LIGHT_OCC_MAX_SAMPLES = 256u;
 // </ELIM>
-// Connectivity + coplanarity merge. The importer's vertex-weld / T-junction pass
-// re-triangulates one logical flat emissive brush face into dozens–hundreds of
-// tiny slivers (needed to seal see-through seam cracks against neighbouring
-// geometry — see surface_gatherer.cpp; must NOT be bypassed). Emitting those
-// fragments as individual lights would track the raw fragment count instead of
-// real face count. Fix: flood-fill each surface's emitter triangles into
-// connected components gated by exact coplanarity — every sliver of one original
-// planar brush face is mutually edge-adjacent and coplanar, so they collapse into ONE
-// island regardless of fragmentation, recovering the true logical face. Two
-// genuinely different faces/fixtures are either not edge-adjacent or (if they touch)
-// disagree in normal, so they stay distinct. Light count then tracks real faces.
+// Connectivity + coplanarity merge. The importer's weld / T-junction pass shatters
+// one flat brush face into dozens to hundreds of slivers (it must, to seal seam
+// cracks). Flood-filling emitter triangles into edge-connected, exactly coplanar
+// components collapses those slivers back into one island per real face; distinct
+// faces are not edge-adjacent or disagree in normal, so they stay apart.
 static constexpr float SURFACE_LIGHT_WELD_EPS = 1e-3f; // Vert quantization for edge matching; finer than welded-coincident spacing.
 static constexpr float SURFACE_LIGHT_COPLANAR_DOT = 0.9995f; // Tight near-parallel gate; brush faces are exactly planar, not "roughly flat".
-// Coplanar-contact occlusion cull. An emitter texture flags EVERY face of its brush
-// (e.g. all six faces of a lava prism), so the underside/sides sandwiched face-to-face
-// against the sealed shell or a wall emit straight into solid: wasted lights that
-// still cost direct-pass visibility rays. Detect it purely
-// geometrically — a solid non-emitter occluder triangle that is coincident with (SAME
-// plane), anti-parallel to, and overlapping the emitter face at its centroid means the
-// face is pressed flush against solid. Deliberately keyed on TRUE coincidence (offset ≈ 0
-// — the flush-contact signature, only float error away): (1) a genuine gap breaks
-// coincidence, so lava legitimately lighting a narrow slot is never culled; (2) it keys on
-// the SAME plane, so the opposite (non-emitter) face of a thin two-sided emitter brush —
-// which sits a brush-thickness behind, not on the emitter plane — is not mistaken for a
-// seal (that emitter fires into open space). CONTACT_EPS is far above post-transform float
-// error yet far below any real brush thickness, so both hold.
+// Coplanar-contact occlusion cull. An emitter texture flags every face of its brush,
+// so faces pressed against the shell or a wall emit into solid and only cost rays.
+// Such a face has a solid, anti-parallel occluder triangle on the same plane. Keying
+// on true coincidence means a real gap (lava lighting a narrow slot) is never culled,
+// and the far face of a thin emitter brush, a brush-thickness away, is not mistaken
+// for contact. CONTACT_EPS is far above float error and far below any brush thickness.
 static constexpr float SURFACE_LIGHT_CONTACT_EPS = 0.02f; // m; flush-coincidence band (>> float error, << any real brush thickness/light gap).
-static constexpr float SURFACE_LIGHT_CONTACT_DOT = -0.99f; // Anti-parallel gate: opposing faces point into each other (dot ≈ -1).
+static constexpr float SURFACE_LIGHT_CONTACT_DOT = -0.99f; // Anti-parallel gate: opposing faces point into each other (dot ~ -1).
 static constexpr float SURFACE_LIGHT_OCC_CELL = 4.0f; // m; occluder spatial-hash cell (chunked worldspawn keeps face tris well under this).
 
 
@@ -212,7 +188,7 @@ static _FORCE_INLINE_ Vector3i _surface_light_occ_cell(const Vector3 &p_p) {
 // any point the triangle covers finds it in a single cell lookup. Worldspawn chunking
 // bounds face size, so a triangle spans only a handful of cells; the guard is a hard
 // backstop against a pathological giant tri (falls back to a single centroid cell, a
-// conservative miss — it can only fail to cull, never cull wrongly).
+// conservative miss - it can only fail to cull, never cull wrongly).
 static void _surface_light_occ_insert(HashMap<Vector3i, LocalVector<int32_t>> &r_grid, int32_t p_idx, const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c) {
 	const Vector3 mn(MIN(p_a.x, MIN(p_b.x, p_c.x)), MIN(p_a.y, MIN(p_b.y, p_c.y)), MIN(p_a.z, MIN(p_b.z, p_c.z)));
 	const Vector3 mx(MAX(p_a.x, MAX(p_b.x, p_c.x)), MAX(p_a.y, MAX(p_b.y, p_c.y)), MAX(p_a.z, MAX(p_b.z, p_c.z)));
@@ -244,7 +220,7 @@ static bool _surface_light_point_in_tri(const Vector3 &p_p, const Vector3 &p_a, 
 // True if an emitter face centroid sits in face-to-face contact with solid: a solid
 // occluder triangle that is anti-parallel, near-coincident (within CONTACT_EPS along the
 // normal), and contains the point in-plane. Detects an emitter jammed against the sealed
-// shell / a wall — it emits straight into solid. See the SURFACE_LIGHT_CONTACT_* comment.
+// shell / a wall - it emits straight into solid. See the SURFACE_LIGHT_CONTACT_* comment.
 static bool _surface_light_test_occluded(const HashMap<Vector3i, LocalVector<int32_t>> &p_grid, const LocalVector<SurfaceLightOccTri> &p_occ, const Vector3 &p_point, const Vector3 &p_normal) {
 	const HashMap<Vector3i, LocalVector<int32_t>>::ConstIterator it = p_grid.find(_surface_light_occ_cell(p_point));
 	if (it == p_grid.end()) {
@@ -257,7 +233,7 @@ static bool _surface_light_test_occluded(const HashMap<Vector3i, LocalVector<int
 			continue; // Not an opposing (anti-parallel) face.
 		}
 		if (Math::abs((p_point - t.v0).dot(t.normal)) > SURFACE_LIGHT_CONTACT_EPS) {
-			continue; // A real gap separates the faces — not contact.
+			continue; // A real gap separates the faces - not contact.
 		}
 		if (_surface_light_point_in_tri(p_point, t.v0, t.v1, t.v2, t.normal)) {
 			return true;
@@ -267,23 +243,12 @@ static bool _surface_light_test_occluded(const HashMap<Vector3i, LocalVector<int
 }
 
 // <ELIM> Island polygon simplification: boundary extraction + retriangulation.
-//
-// The importer's weld / T-junction pass shatters one logical flat emissive face
-// into dozens-to-hundreds of slivers (needed to seal see-through seam cracks —
-// see surface_gatherer.cpp). Those slivers are the island's INTERIOR
-// tessellation, not its shape: every interior edge is shared by two members and
-// contributes nothing, so the island is fully described by its boundary loops.
-// Extracting that boundary, dropping the collinear T-junction vertices strung
-// along it, and re-triangulating reproduces the island EXACTLY with a handful of
-// triangles. That is what makes the triangle cap stop binding: a concave
-// (coplanar-merged multi-brush) emitter no longer has to choose between hundreds
-// of shader triangles and a convex hull that smears its light over geometry that
-// is not emissive at all.
-//
-// Every step is exact or bails. Non-manifold winding, unclosed loops, more than
-// one outer loop, un-bridgeable holes, and any area mismatch against the member
-// triangles all return false, and the caller keeps its existing behaviour rather
-// than emitting geometry that is merely plausible.
+// The weld slivers are interior tessellation, so an island is fully described by
+// its boundary loops; dropping their collinear T-junction vertices and
+// re-triangulating reproduces it exactly with a handful of triangles.
+// Every step is exact or bails: non-manifold winding, unclosed loops, more than one
+// outer loop, un-bridgeable holes or an area mismatch return false, and the caller
+// falls back rather than emit merely plausible geometry.
 static constexpr float SURFACE_LIGHT_COLLINEAR_EPS = 1e-3f; // m; boundary deviation treated as collinear (matches the weld grid).
 static constexpr uint64_t SURFACE_LIGHT_BRIDGE_WORK_LIMIT = 4000000; // Hole-bridge search product guard; simplified loops are orders of magnitude under.
 static constexpr uint32_t SURFACE_LIGHT_MAX_BOUNDARY_VERTS = 512; // Ear-clip input bound; a simplified contour is a face's real corner count.
@@ -313,9 +278,8 @@ static double _surface_light_loop_area(const LocalVector<Vector2> &p_loop) {
 	return a * 0.5;
 }
 
-// Drop boundary vertices sitting on the straight line between their neighbours —
-// the T-junction fragmentation leaves long runs of them, and they are the bulk of
-// the triangle count the cap was fighting.
+// Drop boundary vertices on the straight line between their neighbours: the
+// T-junction fragmentation leaves long runs of them.
 static void _surface_light_drop_collinear(LocalVector<Vector2> &r_loop) {
 	bool changed = true;
 	while (changed && r_loop.size() > 3) {
@@ -605,34 +569,16 @@ static bool _surface_light_simplify_island(const LocalVector<SurfaceLightTri> &p
 }
 // </ELIM>
 
-// Shared surface-light island collector: gather emitter triangles from the given
-// meshes, merge coplanar islands (union-find over welded edges gated by exact
-// coplanarity), then extract each island's analytic polygon (convex hull fan when
-// exact, raw member triangles otherwise). One light per island. Frame-agnostic:
-// islands come out in whatever frame the input xforms are in. Used by both the
-// bake prepare path and the GDScript debug hook so the visualizer is exactly
-// faithful to the bake.
-// <ELIM> Convex-merge fallback for islands the boundary rebuild cannot handle.
-//
-// _surface_light_simplify_island is exact-or-nothing: a pinched boundary, a hole it
-// cannot bridge, or an area mismatch drops the island to EMIT_RAW_MEMBERS. Measured
-// on dfwc2017-6 (test/manual/diag_surface_light_complexity.gd), that is where the
-// triangle count actually lives — the raw-member islands hold over half the map's
-// polygon triangles, and the worst ships 695 triangles for a 63-corner face. The
-// bake charges 2 trace-equivalents per triangle, so this is bake throughput, not
-// just memory. Note the 512-vertex contour cap is NOT what binds (worst case
-// measured: 298) and the collinear epsilon is already doing its job — neither is
-// worth touching.
-//
-// This is the monotone fallback. It never rebuilds a global contour, so holes and
-// pinch vertices cannot defeat it: it grows maximal CONVEX regions out of the member
-// triangles and fans each one. If nothing merges it emits exactly the raw members,
-// so it can never be worse than the path it replaces.
-//
-// A region is accepted only when the convex hull of its accumulated vertices has the
-// same area as the sum of the member triangles inside it. That single test proves
-// convex, gap-free and non-overlapping simultaneously, so the emitted area is
-// preserved by construction rather than by a tolerance check after the fact.
+// <ELIM> Convex-merge fallback for islands the boundary rebuild cannot handle (a
+// pinched boundary, an unbridgeable hole, an area mismatch). Those islands would
+// otherwise emit their raw member triangles, which on real maps hold most of the
+// polygon triangles, and the bake pays for each one.
+// It never rebuilds a global contour, so holes and pinch vertices cannot defeat it:
+// it grows maximal convex regions out of the member triangles and fans each. If
+// nothing merges it emits exactly the raw members, so it is never worse.
+// A region is accepted only when the convex hull of its vertices has the same area
+// as its member triangles, which proves it convex, gap-free and non-overlapping, so
+// the emitted area is preserved by construction.
 static constexpr uint32_t SURFACE_LIGHT_MERGE_MAX_REGION_VERTS = 64; // Bounds per-candidate hull cost.
 static constexpr double SURFACE_LIGHT_MERGE_AREA_REL_EPS = 1e-4;
 
@@ -777,11 +723,14 @@ static bool _surface_light_convex_merge_island(const LocalVector<SurfaceLightTri
 }
 // </ELIM>
 
+// Gathers emitter triangles, merges them into coplanar islands (union-find over
+// welded edges gated by exact coplanarity) and extracts each island's polygon: one
+// light per island, in whatever frame the input xforms are in. The bake and the
+// debug hook share it, so the visualizer matches the bake.
 void LightmapSurfaceLights::collect(const Vector<SurfaceLightMeshInput> &p_inputs, float p_pos_bias, Vector<SurfaceLightIslandLight> &r_islands, bool p_capture_geometry) {
-	// PHASE 1: gather emitter triangles per surface, merge into coplanar islands, and
-	// accumulate the map-wide emissive area (drives the adaptive tile size below). Solid
-	// (non-emitter, non-sky) triangles are indexed into a spatial hash in the same pass so
-	// PHASE 2 can cull emitter faces jammed face-to-face against solid.
+	// PHASE 1: gather emitter triangles per surface and merge them into coplanar
+	// islands. Solid (non-emitter, non-sky) triangles go into a spatial hash in the
+	// same pass, so PHASE 2 can cull emitter faces pressed against solid.
 	LocalVector<SurfaceLightIsland> islands;
 	double total_area = 0.0;
 	LocalVector<SurfaceLightOccTri> occ_tris;
@@ -980,7 +929,7 @@ void LightmapSurfaceLights::collect(const Vector<SurfaceLightMeshInput> &p_input
 
 	// PHASE 2: one analytic polygon light per island. Convex islands (brush
 	// faces, however T-junction-fragmented) collapse to their in-plane convex
-	// hull fan — exact and minimal. Non-convex islands (coplanar-merged
+	// hull fan - exact and minimal. Non-convex islands (coplanar-merged
 	// multi-brush faces) keep their raw member triangles under the per-island
 	// cap; past it they fall back to the hull fan with radiance scaled to
 	// conserve emitted power.
@@ -1019,13 +968,10 @@ void LightmapSurfaceLights::collect(const Vector<SurfaceLightMeshInput> &p_input
 		light.energy = isl.energy;
 		light.component = (int32_t)ci;
 		light.group = isl.group;
-		// <ELIM> Occluded = the fraction of the island's AREA pressed face-to-face
-		// against solid, not a single centroid probe. v1 tested one point per PATCH
-		// (dozens per island), so a point sample was a local decision. v2 emits ONE
-		// light per island, so the same test let a single buried sample cull a
-		// map-spanning emitter: a lava pool with any brush standing in it went
-		// completely dark while a neighbouring pool of the same texture lit fine.
-		// Cull only when the island is essentially fully buried.
+		// <ELIM> Occluded = the fraction of the island's area pressed against solid.
+		// One centroid probe would let a single buried sample cull a whole emitter (a
+		// lava pool with a brush standing in it). Cull only an essentially fully
+		// buried island.
 		// light.occluded = _surface_light_test_occluded(occ_grid, occ_tris, island_centroid, cnormal);
 		{
 			const uint32_t occ_tri_count = isl.tris.size();
@@ -1066,11 +1012,9 @@ void LightmapSurfaceLights::collect(const Vector<SurfaceLightMeshInput> &p_input
 		}
 		const bool convex_exact = hull_n >= 3 && hull_area <= (double)isl.area * (double)SURFACE_LIGHT_HULL_TOLERANCE;
 
-		// <ELIM> A non-convex island is rebuilt from its boundary BEFORE the cap
-		// is consulted, so the cap sees the island's real shape complexity rather
-		// than the importer's T-junction fragmentation. The hull fallback below is
-		// then the pathological-map backstop it was always meant to be, not the
-		// routine outcome for every coplanar-merged multi-brush face.
+		// <ELIM> A non-convex island is rebuilt from its boundary before the cap is
+		// consulted, so the cap sees real shape complexity, not T-junction
+		// fragmentation, and the hull fallback stays a backstop.
 		LocalVector<Vector2> simple_tris_2d;
 		bool simplified = false;
 		if (!convex_exact) {
@@ -1144,7 +1088,7 @@ void LightmapSurfaceLights::collect(const Vector<SurfaceLightMeshInput> &p_input
 			}
 		} else {
 			// Raw member triangles. Winding-normalize each against the island
-			// normal — the cross product's sign depends on source winding (Godot
+			// normal - the cross product's sign depends on source winding (Godot
 			// fronts wind clockwise) and only the vertex normal is authoritative.
 			for (uint32_t m = 0; m < isl.tris.size(); m++) {
 				const SurfaceLightTri &tri = isl.tris[m];
@@ -1210,7 +1154,7 @@ void LightmapSurfaceLights::collect(const Vector<SurfaceLightMeshInput> &p_input
 }
 
 // Each island becomes ONE analytic AREA_POLY light carrying its polygon. The
-// range solves the peak unshadowed contribution E·A/d² = CUTOFF for d, plus the
+// range solves the peak unshadowed contribution E*A/d^2 = CUTOFF for d, plus the
 // island bounding radius so the centroid distance test is conservative for texels
 // near a big island's edge. Islands flagged occluded (face-to-face contact with
 // solid) emit into solid and are skipped. Submitted grouped by fixture: the direct

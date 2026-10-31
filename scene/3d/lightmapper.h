@@ -175,7 +175,7 @@ public:
 		// </ELIM>
 		// <ELIM> Trace-only geometry: contributes triangles (with surface_flags) to
 		// the trace grid so it emits (Q3 sky) and/or occludes/seals the bake, but
-		// owns NO atlas chart — no albedo/emission UV2 source, no atlas slice, no
+		// owns NO atlas chart - no albedo/emission UV2 source, no atlas slice, no
 		// texels baked. Its uv2 is padded with dummies to keep array lengths aligned.
 		bool trace_only = false;
 		// </ELIM>

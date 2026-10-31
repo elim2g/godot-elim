@@ -20,7 +20,7 @@ layout(set = 0, binding = 0) uniform BakeParameters {
 	uint transparency_rays;
 	float supersampling_factor;
 
-	// <ELIM> Bounce chroma boost. Scalar only — std140 pads the struct tail to the
+	// <ELIM> Bounce chroma boost. Scalar only: std140 pads the struct tail to the
 	// 16-byte multiple the C++ side spells out explicitly. 1.0 = upstream-identical.
 	float bounce_saturation;
 	// </ELIM>
@@ -43,17 +43,13 @@ vertices;
 #define CULL_FRONT 1
 #define CULL_BACK 2
 
-// <ELIM> Per-surface bake flags packed into Triangle.surface_flags (was pad1).
-// Bit 0 = Q3-style sky face (emits / lets the sun through). Bit 1 = trace-only
-// occluder: it is in the trace grid + renders, but owns no atlas chart, so it
-// must never be atlas-sampled. A non-sky trace-only face resolves to opaque
-// black (alpha=1 seals the bake, albedo=0 = zero bounce). A face may carry both
-// bits (a sky face that is also trace-only); the sky checks run first.
+// <ELIM> Per-surface bake flags in Triangle.surface_flags. A trace-only face owns
+// no atlas chart, so it is never atlas-sampled: a non-sky one is opaque black
+// (seals the bake, zero bounce). A face may carry both bits; sky checks run first.
 #define SURFACE_FLAG_SKY 1u
 #define SURFACE_FLAG_TRACE_ONLY 2u
-// Bit 2 = surface light: emission is integrated analytically as
-// LIGHT_TYPE_AREA_POLY lights, so the bounce pass must not also add the
-// rasterized emission (double count).
+// Emission integrated analytically as AREA_POLY lights; the bounce pass must not
+// add it again.
 #define SURFACE_FLAG_SURFACE_LIGHT 4u
 // </ELIM>
 
@@ -63,7 +59,7 @@ struct Triangle {
 	vec3 min_bounds;
 	uint cull_mode;
 	vec3 max_bounds;
-	// <ELIM> was pad1; bit SURFACE_FLAG_SKY marks Q3-style sky faces.
+	// <ELIM> SURFACE_FLAG_* bits, in the old padding slot.
 	// uint pad1;
 	uint surface_flags;
 	// </ELIM>
@@ -90,10 +86,10 @@ triangle_indices;
 #define LIGHT_TYPE_OMNI 1
 #define LIGHT_TYPE_SPOT 2
 // <ELIM> Analytic polygonal surface light; must match
-// Lightmapper::LIGHT_TYPE_AREA_POLY. For this type: direction = island
-// normal, attenuation = island area (reference), size = island bounding
-// radius (reference), pad = first vec4 index into poly_verts,
-// cos_spot_angle = bit-cast triangle count.
+// Lightmapper::LIGHT_TYPE_AREA_POLY. For this type: direction = island normal,
+// attenuation = island area, size = bounding radius, pad = first vec4 index into
+// poly_verts, cos_spot_angle = bit-cast triangle count, inv_spot_attenuation =
+// bit-cast fixture id.
 #define LIGHT_TYPE_AREA_POLY 3
 // </ELIM>
 
@@ -158,9 +154,7 @@ cluster_aabbs;
 // <ELIM> Surface-light island polygons: triples of vec4 forming triangles.
 // xyz = world-space vertex, pre-offset by the bake bias along the island
 // normal, winding normalized CPU-side so cross(v1-v0, v2-v0) points along the
-// island normal. w is unused padding: visibility sampling used to walk an area
-// CDF stored there, but rays are now handed out by each triangle's analytic
-// contribution to the RECEIVING TEXEL, which no CPU-side table can express.
+// island normal. w is unused.
 layout(set = 0, binding = 13, std430) restrict readonly buffer PolyVerts {
 	vec4 data[];
 }

@@ -445,14 +445,11 @@ LightmapGIData::~LightmapGIData() {
 
 void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &meshes, Vector<LightsFound> &lights, Vector<Vector3> &probes) {
 	MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(p_at_node);
-	// <ELIM> Trace-only meshes (tnt_lightmap_trace_only) are collected regardless of
-	// gi_mode and WITHOUT the UV2 requirement: they contribute triangles (with their
-	// surface flags) to the trace structures so they occlude/seal the bake and render,
-	// but are never atlas-baked. Covers both Q3 sky faces and opaque occluders. Guarded
-	// by !collected_trace_only below so a STATIC trace-only mesh is collected once. Meta
-	// name must match libturnt's set_meta side.
+	// <ELIM> Trace-only meshes (Q3 sky faces and opaque occluders) are collected
+	// regardless of gi_mode and without UV2: their triangles occlude and seal the bake,
+	// but they are never atlas-baked. !collected_trace_only below keeps a STATIC one
+	// from being collected twice. The meta name must match libturnt's set_meta side.
 	bool collected_trace_only = false;
-	// was: mi->get_meta(SNAME("tnt_lightmap_emit_only"), false)
 	if (mi && bool(mi->get_meta(SNAME("tnt_lightmap_trace_only"), false)) && mi->is_visible_in_tree()) {
 		Ref<Mesh> mesh = mi->get_mesh();
 		if (mesh.is_valid()) {
@@ -1050,10 +1047,9 @@ LightmapGI::BakeError LightmapGI::_save_and_reimport_atlas_textures(const Ref<Li
 	return LightmapGI::BAKE_ERROR_OK;
 }
 
-// <ELIM> bake() is now a thin orchestrator over three phases that the threaded
-// script path (bake_prepare/bake_gpu/bake_finalize) drives separately. The
-// synchronous path runs all three back-to-back on the calling thread, so its
-// behavior is identical to upstream. See claude-docs/LIGHTMAP_THREADED_BAKE.md.
+// <ELIM> bake() runs the three phases the threaded script path
+// (bake_prepare/bake_gpu/bake_finalize) drives separately, back to back on the
+// calling thread, so it behaves as upstream.
 LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata) {
 	BakeState state;
 	BakeError prep_err = _bake_prepare_internal(p_from_node, p_image_data_path, p_bake_step, p_bake_userdata, state);
@@ -1065,7 +1061,7 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 }
 
 // PHASE 1 (MAIN THREAD): mesh/light discovery, the per-mesh RS::bake_render_uv2
-// render, probe generation, and the environment panorama — everything that
+// render, probe generation, and the environment panorama - everything that
 // depends on the global RenderingServer or the scene tree. Populates the
 // lightmapper and the shared BakeState; no GPU bake happens here.
 LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata, BakeState &r_state) {
@@ -1093,9 +1089,7 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 	Vector<Lightmapper::MeshData> mesh_data;
 	Vector<LightsFound> lights_found;
 	Vector<Vector3> probes_found;
-	// <ELIM> Island lights generated after the mesh loop by LightmapSurfaceLights::collect
-	// (shared with the debug hook); flushed to the lightmapper alongside the punctual lights.
-	// (Fork-only decl; no upstream line touched.)
+	// <ELIM> Island lights, collected after the mesh loop and added with the punctual lights.
 	Vector<SurfaceLightIslandLight> surface_light_islands;
 	// </ELIM>
 	AABB bounds;
@@ -1219,11 +1213,9 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 					mat_rid = mat->get_rid();
 				}
 
-				// <ELIM> Per-triangle surface_flags from the EFFECTIVE material (TURNT
-				// assigns via surface override): SKY pass-through, and the SURFACE_LIGHT
-				// double-count guard (the bounce pass skips these triangles' rasterized
-				// emission). The area lights themselves come from
-				// LightmapSurfaceLights::collect after the mesh loop.
+				// <ELIM> Per-triangle surface_flags from the effective material (TURNT
+				// assigns via surface override): sky pass-through, and the surface-light
+				// guard that stops the bounce pass adding rasterized emission again.
 				const Ref<Material> eff_mat = (i < mf.overrides.size() && mf.overrides[i].is_valid()) ? mf.overrides[i] : mat;
 				const int32_t surface_flags = (int32_t)LightmapSurfaceLights::surface_bake_flags(eff_mat);
 				// </ELIM>
@@ -1256,11 +1248,8 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 					ERR_CONTINUE(uv.is_empty());
 				}
 				// </ELIM>
-				// <ELIM> Collection relaxes only the UV2 requirement for trace-only
-				// meshes; a trace-only surface that also lacks normals still passes
-				// collection but is dropped here, so it silently fails to seal the
-				// bake (contrary to intent). Warn so the drop is visible (normals are
-				// virtually always present, so this is diagnostic, not a behavior change).
+				// <ELIM> Collection relaxes only the UV2 requirement for trace-only meshes,
+				// so one without normals is dropped here and fails to seal the bake. Warn.
 				if (mf.trace_only && normals.is_empty()) {
 					WARN_PRINT(vformat("LightmapGI: trace-only surface %d of '%s' has no normals; skipping (it will not occlude/seal the bake).", i, String(mf.node_path)));
 				}
@@ -1315,25 +1304,19 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 						// </ELIM>
 					}
 
-					// <ELIM> Surface-light patch geometry is gathered post-loop by
-					// LightmapSurfaceLights::collect (from meshes_found), not per triangle here. </ELIM>
+					// <ELIM> Surface-light geometry is collected after the mesh loop. </ELIM>
 				}
 
-				// <ELIM> Surface-light AREA-PATCH generation (collect emitter triangles ->
-				// merge coplanar islands via union-find over welded edges -> adaptive
-				// subdivide) now lives in the shared LightmapSurfaceLights::collect(), run
-				// once after the mesh loop from meshes_found, so the same code path feeds
-				// both the bake and the GDScript debug hook. Nothing to do per surface. </ELIM>
+				// <ELIM> Surface lights are collected once after the mesh loop, by the
+				// collector the debug hook shares. Nothing to do per surface. </ELIM>
 			}
 
 			mesh_data.push_back(md);
 		}
 
-		// <ELIM> Generate surface-light area patches from every collected emitter surface
-		// via the shared collector (also used by debug_get_surface_light_patches). Run once
-		// here — not per mesh — so the adaptive patch budget sees the whole map's emissive
-		// area before any island is tiled. Bake frame is lightmapper-relative (mf.xform), so
-		// patches land exactly where the direct pass integrates them.
+		// <ELIM> Surface-light islands from every emitter surface, in the
+		// lightmapper-relative frame (mf.xform) the direct pass integrates in. Run once
+		// for the whole map: fixtures group across meshes, and the vertex cap is map-wide.
 		{
 			Vector<SurfaceLightMeshInput> sl_inputs;
 			sl_inputs.resize(meshes_found.size());
@@ -1487,12 +1470,9 @@ LightmapGI::BakeError LightmapGI::_bake_prepare_internal(Node *p_from_node, Stri
 
 		// <ELIM> Surface-light islands: one analytic AREA_POLY light each.
 		const int emitted_islands = LightmapSurfaceLights::add_to_lightmapper(lightmapper, surface_light_islands);
-		// Diagnostic for GPU-TDR/device-removed bake failures: the direct-light
-		// pass loops every light for every texel with no spatial acceleration, so
-		// total light count (punctual + island) is the primary driver of a
-		// single dispatch's cost. Always-visible (not gated behind print_verbose)
-		// since this is the first thing to check when a bake hangs/crashes. Counts
-		// EMITTED islands (post occlusion cull), i.e. the real per-texel light load.
+		// Light count drives the direct pass's cost, the first thing to check when a
+		// bake hangs or loses the device, so it is always printed. Counts emitted
+		// islands (after the occlusion cull).
 		print_line(vformat("LightmapGI: baking with %d total light(s) (%d punctual, %d surface-light island(s)).",
 				(int)lights_found.size() + emitted_islands, (int)lights_found.size(), emitted_islands));
 		// </ELIM>
@@ -1617,7 +1597,7 @@ LightmapGI::BakeError LightmapGI::_map_lightmapper_error(Lightmapper::BakeError 
 }
 
 // PHASE 3 (MAIN THREAD): everything that touches the global RS or the scene
-// tree again — building the embedded Texture2DArray, assembling + saving the
+// tree again - building the embedded Texture2DArray, assembling + saving the
 // LightmapGIData, and assigning it back onto the instances.
 LightmapGI::BakeError LightmapGI::_bake_finalize_internal(BakeState &p_state, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata) {
 	Ref<Lightmapper> lightmapper = p_state.lightmapper;
@@ -1999,11 +1979,9 @@ void LightmapGI::_release_pending_bake() {
 }
 // </ELIM>
 
-// <ELIM> See lightmap_gi.h. Reuses _find_meshes_and_lights (identical mesh selection to
-// the bake) then converts each mesh transform to WORLD space (lm_global * lm-relative),
-// so returned patches sit at live world coordinates — no BAKE_TREE_OFFSET, which is
-// applied GDScript-side only. Same collector, emitter detection and bias as the bake, so
-// the visualization is exactly faithful to what a bake would emit for this emitter config.
+// <ELIM> Same mesh selection, collector and bias as the bake, so the visualization
+// matches what a bake would emit. Transforms go to world space (lm_global *
+// lm-relative); BAKE_TREE_OFFSET is applied GDScript-side only.
 TypedArray<Dictionary> LightmapGI::debug_get_surface_light_patches(Node *p_from_node) {
 	TypedArray<Dictionary> out;
 
@@ -2029,12 +2007,8 @@ TypedArray<Dictionary> LightmapGI::debug_get_surface_light_patches(Node *p_from_
 	Vector<SurfaceLightIslandLight> patches;
 	LightmapSurfaceLights::collect(sl_inputs, MAX(0.01f, bias), patches, true /* capture real geometry */);
 
-	// One dict PER REAL FOOTPRINT TRIANGLE (each patch carries the world-space tris that
-	// actually compose it — the island's analytic triangles: hull fan or member
-	// tris). Keeping exactly 3 verts per dict means the UI draw loop (3 edges per
-	// triple) is unchanged; normal/area/component/occluded are the owning
-	// island's, so all tris of one island share them (colour by component, grey
-	// if occluded).
+	// One dict per footprint triangle of an island (hull fan or member triangles);
+	// normal/area/component/occluded are the island's, shared by all its triangles.
 	for (int i = 0; i < patches.size(); i++) {
 		const SurfaceLightIslandLight &sp = patches[i];
 		const PackedVector3Array &fv = sp.dbg_verts;
@@ -2488,7 +2462,7 @@ void LightmapGI::_bind_methods() {
 	// <ELIM> Runtime bake binding (upstream keeps the line above commented out).
 	ClassDB::bind_method(D_METHOD("bake", "from_node", "image_data_path", "progress"), &LightmapGI::bake_scripted, DEFVAL(Variant()), DEFVAL(String()), DEFVAL(Callable())); // </ELIM>
 
-	// <ELIM> Threaded bake phases (see claude-docs/LIGHTMAP_THREADED_BAKE.md).
+	// <ELIM> Threaded bake phases.
 	ClassDB::bind_method(D_METHOD("bake_prepare", "from_node", "image_data_path", "progress"), &LightmapGI::bake_prepare, DEFVAL(Variant()), DEFVAL(String()), DEFVAL(Callable()));
 	ClassDB::bind_method(D_METHOD("bake_gpu", "progress"), &LightmapGI::bake_gpu, DEFVAL(Callable()));
 	ClassDB::bind_method(D_METHOD("bake_finalize"), &LightmapGI::bake_finalize);

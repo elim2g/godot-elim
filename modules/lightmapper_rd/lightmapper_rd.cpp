@@ -149,16 +149,13 @@ void LightmapperRD::add_spot_light(const String &p_name, bool p_static, const Ve
 	light_metadata.push_back(md);
 }
 
-// <ELIM> Analytic polygonal surface light: one light per emissive island,
-// carrying its triangle geometry (flat v0,v1,v2 triples, winding-normalized
-// and bias-offset by the caller) in the poly_verts SSBO. Reuses the punctual
-// Light struct: `attenuation` carries the island AREA (reference), `size` the
-// island bounding radius (reference), `pad` the first vec4 index into the
-// polygon buffer, and `cos_spot_angle` the bit-cast triangle count. The w
-// component is unused padding: visibility sampling used to walk an area CDF
-// stored there, but the shader now hands rays out by each triangle's analytic
-// contribution to the receiving texel, which no CPU-side table can express.
-// lights.sort() is safe: the reference travels inside the struct.
+// <ELIM> Analytic polygonal surface light: one light per emissive island, its
+// triangles (flat v0,v1,v2 triples, winding-normalized and bias-offset by the
+// caller, w unused) in the poly_verts SSBO. Reuses the punctual Light struct:
+// `attenuation` = island area, `size` = bounding radius, `pad` = first vec4 index
+// into the polygon buffer, `cos_spot_angle` = bit-cast triangle count,
+// `inv_spot_attenuation` = bit-cast fixture id. The polygon reference travels in
+// the struct, so lights.sort() is safe.
 void LightmapperRD::add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts, uint32_t p_group) {
 	const int tri_count = p_poly_verts.size() / 3;
 	ERR_FAIL_COND_MSG(tri_count < 1 || p_poly_verts.size() % 3 != 0, vformat("Area poly light '%s' needs a non-empty multiple-of-3 vertex list (got %d).", p_name, p_poly_verts.size()));
@@ -418,10 +415,8 @@ Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_
 	while (atlas_size.x <= p_max_texture_size && atlas_size.y <= p_max_texture_size) {
 		Vector<Vector2i> source_sizes;
 		Vector<int> source_indices;
-		// <ELIM> Pack only atlas-baked meshes; trace-only meshes are excluded from the
-		// packer entirely (their source_index/offset is never produced). source_indices
-		// still references the original mesh_instances index so atlas_offsets (sized to
-		// all meshes) stays addressable for the real meshes.
+		// <ELIM> Pack only atlas-baked meshes. source_indices keeps the mesh_instances
+		// index, so atlas_offsets (sized to all meshes) stays addressable.
 		for (int i = 0; i < sizes.size(); i++) {
 			if (mesh_instances[i].trace_only) {
 				continue;
@@ -509,10 +504,9 @@ Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_
 
 	for (int m_i = 0; m_i < mesh_instances.size(); m_i++) {
 		MeshInstance &mi = mesh_instances.write[m_i];
-		// <ELIM> Trace-only meshes own no atlas: no offset, no real slice, no blit.
-		// Use a sentinel slice one past the last valid slice so their triangles sort
-		// after all atlas-baked ones and are excluded from per-slice raster/seam/texel
-		// passes (which iterate [0, atlas_slices)); the grid plot still emits them.
+		// <ELIM> Trace-only meshes own no atlas. The sentinel slice one past the last
+		// sorts their triangles after the baked ones and out of every per-slice pass;
+		// the grid plot still emits them.
 		if (mi.trace_only) {
 			mi.offset = Vector2i();
 			mi.slice = atlas_slices;
@@ -673,9 +667,8 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 			if (material.is_valid()) {
 				t.cull_mode = RSG::material_storage->material_get_cull_mode(material);
 			}
-			// <ELIM> Carry the per-surface sky flag (parallel to material) to the GPU,
-			// then OR in SURFACE_FLAG_TRACE_ONLY for trace-only meshes so the GLSL treats
-			// non-sky trace-only faces as opaque black occluders (never atlas-sampled).
+			// <ELIM> Per-surface flags, plus SURFACE_FLAG_TRACE_ONLY for trace-only meshes
+			// (opaque black occluders, never atlas-sampled).
 			// t.pad1 = 0; //make valgrind not complain
 			t.surface_flags = (i < mi.data.surface_flags.size()) ? uint32_t(mi.data.surface_flags[i]) : 0;
 			if (mesh_trace_only) {
@@ -683,9 +676,8 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 			}
 			// </ELIM>
 			triangles.push_back(t);
-			// <ELIM> Trace-only triangles own no atlas slice (sentinel == atlas_slices),
-			// so they must NOT be counted in slice_triangle_count (sized atlas_slices)
-			// — they are still plotted into the grid below and traced on the GPU.
+			// <ELIM> Trace-only triangles (sentinel slice) stay out of slice_triangle_count;
+			// they are still plotted into the grid and traced.
 			if (!mesh_trace_only) {
 				slice_triangle_count.write[t.slice]++;
 			}
@@ -1295,12 +1287,10 @@ LightmapperRD::BakeError LightmapperRD::_denoise(RenderingDevice *p_rd, Ref<RDSh
 	return BAKE_OK;
 }
 
-// <ELIM> TDR guard. The direct and bounce passes are split into dispatches whose
-// GPU time is measured (submit + sync wall time on the bake's local device, an
-// upper bound on the GPU's own time) and kept under a target well below the
-// driver watchdog. Work is counted in cost units: worst-case BVH traces per
-// occupied texel. The model only has to rank work; the measured rate converts it
-// to time.
+// <ELIM> TDR guard: the direct and bounce passes time each dispatch (submit + sync
+// wall time on the local device, an upper bound on GPU time) and keep it under a
+// target well below the driver watchdog. Cost units are worst-case BVH traces per
+// occupied texel; the model only ranks work, the measured rate converts it to time.
 
 // First-dispatch rate in cost units per usec, below what a slow integrated GPU
 // manages on the costliest light, so the first dispatch is short on any hardware.
@@ -1449,7 +1439,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	if (EditorSettings::get_singleton() != nullptr) {
 		oidn_path = EDITOR_GET("filesystem/tools/oidn/oidn_denoise_path");
 	} else {
-		denoiser = 0; // JNLM — OIDN is editor-only.
+		denoiser = 0; // JNLM: OIDN is editor-only.
 	}
 
 	if (p_use_denoiser && denoiser == 1) {
@@ -1774,6 +1764,17 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	Vector<int> slice_seam_count;
 
 // <ELIM> poly_verts_buffer added (comments can't live inside the macro body).
+// #define FREE_BUFFERS
+// 	rd->free_rid(bake_parameters_buffer);
+// 	rd->free_rid(vertex_buffer);
+// 	rd->free_rid(triangle_buffer);
+// 	rd->free_rid(lights_buffer);
+// 	rd->free_rid(triangle_indices_buffer);
+// 	rd->free_rid(cluster_indices_buffer);
+// 	rd->free_rid(cluster_aabbs_buffer);
+// 	rd->free_rid(grid_texture);
+// 	rd->free_rid(seams_buffer);
+// 	rd->free_rid(probe_positions_buffer);
 #define FREE_BUFFERS                       \
 	rd->free_rid(bake_parameters_buffer);  \
 	rd->free_rid(vertex_buffer);           \
@@ -2313,10 +2314,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 		RID light_uniform_set = rd->uniform_set_create(uniforms, compute_shader_primary, 1);
 
-		// <ELIM> TDR guard: every texel evaluates every light, so a region costs
-		// texels * sum(light cost); it runs as paced dispatches (see
-		// _dispatch_region_paced). A fixture's lights stay in one batch when they fit,
-		// so the emitter-arc pass sums the fixture as one run.
+		// <ELIM> TDR guard: a region costs texels * sum(light cost), so it runs as paced
+		// dispatches. A fixture stays in one batch when it fits: the emitter-arc pass
+		// sums a fixture as one run.
 		const int total_light_count = (int)lights.size();
 		const double soft_shadow_rays = (double)SHADOW_AA_SAMPLES * MAX(1, (int)push_constant.ray_count / SHADOW_AA_SAMPLES);
 		LocalVector<double> light_cost_prefix; // Summed per-texel cost of lights [0, i).

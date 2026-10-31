@@ -237,11 +237,9 @@ private:
 	Ref<LightmapGIData> light_data;
 	Node *last_owner = nullptr;
 
-	// <ELIM> Threaded bake: bake() is split into prepare (MAIN) / gpu (WORKER) /
-	// finalize (MAIN) phases so a script can run the GPU bake on a Thread while
-	// the main loop keeps rendering a live progress bar. The intermediate state
-	// produced by prepare and consumed by gpu + finalize lives on the node (one
-	// bake per node at a time). See claude-docs/LIGHTMAP_THREADED_BAKE.md.
+	// <ELIM> Threaded bake: prepare (main) / gpu (worker) / finalize (main), so the
+	// main loop keeps rendering a progress bar while the GPU bakes. The state passed
+	// between phases lives on the node: one bake per node at a time.
 	struct BakeState {
 		Ref<Lightmapper> lightmapper;
 		String image_data_path;
@@ -302,9 +300,8 @@ private:
 		Ref<Mesh> mesh;
 		float lightmap_scale = 0.0;
 		Vector<Ref<Material>> overrides;
-		// <ELIM> Trace-only mesh (tnt_lightmap_trace_only): traced (so it emits if
-		// it's a sky face, and occludes/seals the bake either way) and rendered, but
-		// allocated no atlas — collected without the UV2/GI_STATIC requirements.
+		// <ELIM> Trace-only mesh (tnt_lightmap_trace_only): traced and rendered but
+		// owns no atlas, so it is collected without the UV2/GI_STATIC requirements.
 		bool trace_only = false;
 		// </ELIM>
 	};
@@ -448,26 +445,24 @@ public:
 	BakeError bake(Node *p_from_node, String p_image_data_path = "", Lightmapper::BakeStepFunc p_bake_step = nullptr, void *p_bake_userdata = nullptr);
 
 	// <ELIM> Script-facing bake with Callable progress; upstream leaves bake()
-	// unbound. See claude-docs/GODOT_RUNTIME_LIGHTMAP_BAKE_PATCH.md.
+	// unbound.
 	BakeError bake_scripted(Node *p_from_node = nullptr, const String &p_image_data_path = "", const Callable &p_progress = Callable()); // </ELIM>
 
-	// <ELIM> Threaded bake phases (script-facing). A script calls bake_prepare on
-	// the main thread, runs bake_gpu on a Thread, then bake_finalize back on the
-	// main thread. The progress Callable receives (completion: float, step:
-	// String) and returns true to cancel; during bake_gpu it is invoked from the
-	// worker thread, so it must only touch thread-safe state. See
-	// claude-docs/LIGHTMAP_THREADED_BAKE.md.
+	// <ELIM> Threaded bake phases (script-facing): bake_prepare on the main thread,
+	// bake_gpu on a Thread, bake_finalize on the main thread. The progress Callable
+	// gets (completion: float, step: String) and returns true to cancel; during
+	// bake_gpu it runs on the worker, so it may only touch thread-safe state.
 	BakeError bake_prepare(Node *p_from_node = nullptr, const String &p_image_data_path = "", const Callable &p_progress = Callable());
 	BakeError bake_gpu(const Callable &p_progress = Callable());
 	BakeError bake_finalize();
 	void bake_abort();
 	// </ELIM>
 
-	// <ELIM> Decoupled debug hook: runs the shared surface-light patch collector on the
-	// LIVE tree (no bake) and returns the emitted patches in WORLD space for visualization.
-	// Each entry: { verts: PackedVector3Array(3 footprint verts), normal: Vector3,
-	// area: float (m^2), component: int (merged-island index) }. GDScript must have applied
-	// the emitter materials (tnt_surface_light) first — identical detection to the bake.
+	// <ELIM> Debug hook: runs the surface-light collector on the live tree (no bake)
+	// and returns the island footprint triangles in world space. Each entry:
+	// { verts: PackedVector3Array (3), normal: Vector3, area: float (m^2),
+	// component: int (island index), occluded: bool }. The emitter materials
+	// (tnt_surface_light) must already be applied, as for a bake.
 	TypedArray<Dictionary> debug_get_surface_light_patches(Node *p_from_node = nullptr);
 	// </ELIM>
 

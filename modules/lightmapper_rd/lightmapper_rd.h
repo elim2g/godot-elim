@@ -60,20 +60,16 @@ class LightmapperRD : public Lightmapper {
 		uint32_t transparency_rays = 0;
 		float supersampling_factor = 0.0f;
 
-		// <ELIM> Bounce chroma boost (q3map2 -bouncecolorratio analogue). APPENDED,
-		// never inserted, so every existing field offset stays put. This is a std140
-		// UBO: the struct must stay a 16-byte multiple, so the lone float carries 3
-		// pad floats on the C++ side (128 -> 144). GLSL declares ONLY the scalar and
-		// lets std140 pad the tail — a GLSL float[3] would be 48 bytes, not 12.
+		// <ELIM> Bounce chroma boost (q3map2 -bouncecolorratio analogue), appended so
+		// no field offset moves. std140 pads the GLSL scalar to 16 bytes; the C++ side
+		// pads explicitly (a GLSL float[3] would be 48 bytes, not 12).
 		float bounce_saturation = 1.0f;
 		float pad_bounce_saturation[3] = {};
 		// </ELIM>
 	};
 
-	// <ELIM> BakeParameters is a std140 UBO shared with lm_common_inc.glsl. std140
-	// rounds the struct up to a 16-byte multiple, so a C++ size that is not a
-	// multiple of 16 desyncs every field the shader reads past the gap — and the
-	// headless dummy renderer cannot catch it. Fail the build instead.
+	// <ELIM> std140 rounds this UBO to 16 bytes; any other C++ size desyncs every
+	// later field, which the headless dummy renderer cannot catch.
 	static_assert(sizeof(BakeParameters) % 16 == 0,
 			"BakeParameters must stay a multiple of 16 bytes to match its std140 GLSL layout.");
 	// </ELIM>
@@ -82,10 +78,8 @@ class LightmapperRD : public Lightmapper {
 		MeshData data;
 		int slice = 0;
 		Vector2i offset;
-		// <ELIM> Trace-only mesh: traced (its triangles + surface_flags go into the
-		// grid/GPU buffer so it emits if it's a sky face and occludes/seals the bake
-		// either way) but excluded from atlas sizing/packing/blit and owning zero
-		// atlas texels. Mirrors MeshData::trace_only.
+		// <ELIM> Trace-only mesh: in the trace grid (occludes, and emits if sky) but
+		// owns no atlas texels. Mirrors MeshData::trace_only.
 		bool trace_only = false;
 		// </ELIM>
 	};
@@ -225,16 +219,13 @@ class LightmapperRD : public Lightmapper {
 		}
 	};
 
-	// <ELIM> Per-surface bake flags packed into Triangle::surface_flags (was pad1).
-	// Must match the #defines in lm_common_inc.glsl. Bit 0 = Q3-style sky face;
-	// bit 1 = trace-only occluder (in the trace grid + renders, but owns no atlas
-	// chart, so the GLSL treats non-sky trace-only faces as opaque black instead
-	// of atlas-sampling them).
+	// <ELIM> Per-surface bake flags in Triangle::surface_flags; must match
+	// lm_common_inc.glsl. A trace-only face owns no atlas chart, so the shader treats
+	// it as opaque black instead of sampling the atlas.
 	static constexpr uint32_t SURFACE_FLAG_SKY = 1u;
 	static constexpr uint32_t SURFACE_FLAG_TRACE_ONLY = 2u;
-	// Bit 2 = surface light: its emission is integrated analytically as
-	// LIGHT_TYPE_AREA_POLY lights, so the bounce pass must not also add its
-	// rasterized emission (double count).
+	// Emission integrated analytically as AREA_POLY lights; the bounce pass must not
+	// add it again.
 	static constexpr uint32_t SURFACE_FLAG_SURFACE_LIGHT = 4u;
 	// </ELIM>
 	struct Triangle {
@@ -243,7 +234,7 @@ class LightmapperRD : public Lightmapper {
 		float min_bounds[3] = {};
 		uint32_t cull_mode = 0;
 		float max_bounds[3] = {};
-		// <ELIM> was pad1; bit 0 = Q3-style sky face, bit 1 = trace-only occluder.
+		// <ELIM> SURFACE_FLAG_* bits, in the old padding slot.
 		// float pad1 = 0.0;
 		uint32_t surface_flags = 0;
 		// </ELIM>
@@ -319,23 +310,16 @@ class LightmapperRD : public Lightmapper {
 		uint32_t ray_count = 0;
 		uint32_t ray_from = 0;
 		uint32_t ray_to = 0;
-		// <ELIM> Direct-pass light batching (TDR guard): the primary light pass
-		// splits its per-texel light loop into [light_from, light_to) batches so
-		// one dispatch's O(texels*lights*rays) cost stays under the GPU watchdog.
-		// Field order/offsets must match the push_constant block in lm_compute.glsl.
+		// <ELIM> The direct pass's light batch [light_from, light_to) (TDR guard).
+		// Field order must match the push_constant block in lm_compute.glsl.
 		uint32_t light_from = 0;
 		uint32_t light_to = 0;
 		// </ELIM>
 		uint32_t region_ofs[2] = {};
 		uint32_t probe_count = 0;
 		uint32_t denoiser_range = 0;
-		// <ELIM> Adding light_from/light_to (TDR guard) grew this struct 32->40;
-		// Vulkan/RD rounds the shader's push-constant range up to a 16-byte
-		// multiple (48), so the supplied sizeof() must match or
-		// compute_list_set_push_constant rejects it ("requires 48, supplied 40").
-		// The first padding slot now carries the surface-light visibility ray
-		// count (analytic area-poly lights); pad0 keeps the 48-byte size.
-		// Field order/offsets must match the push_constant block in lm_compute.glsl.
+		// <ELIM> RD rounds the shader's push-constant range up to a 16-byte multiple,
+		// and sizeof(PushConstant) must equal it (48); pad0 keeps that size.
 		uint32_t surface_light_vis_rays = 16;
 		uint32_t pad0 = 0;
 		// </ELIM>
@@ -386,7 +370,7 @@ public:
 	virtual void add_directional_light(const String &p_name, bool p_static, const Vector3 &p_direction, const Color &p_color, float p_energy, float p_indirect_energy, float p_angular_distance, float p_shadow_blur) override;
 	virtual void add_omni_light(const String &p_name, bool p_static, const Vector3 &p_position, const Color &p_color, float p_energy, float p_indirect_energy, float p_range, float p_attenuation, float p_size, float p_shadow_blur) override;
 	virtual void add_spot_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 p_direction, const Color &p_color, float p_energy, float p_indirect_energy, float p_range, float p_attenuation, float p_spot_angle, float p_spot_attenuation, float p_size, float p_shadow_blur) override;
-	// <ELIM> analytic polygonal surface light (see Lightmapper::add_area_poly_light).
+	// <ELIM> Analytic polygonal surface light.
 	virtual void add_area_poly_light(const String &p_name, bool p_static, const Vector3 &p_position, const Vector3 &p_normal, const Color &p_color, float p_energy, float p_indirect_energy, float p_area, float p_range, const PackedVector3Array &p_poly_verts, uint32_t p_group) override;
 	// </ELIM>
 	virtual void add_probe(const Vector3 &p_position) override;
