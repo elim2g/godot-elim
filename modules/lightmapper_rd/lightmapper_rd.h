@@ -107,7 +107,19 @@ class LightmapperRD : public Lightmapper {
 		uint32_t pad = 0;
 
 		bool operator<(const Light &p_light) const {
-			return type < p_light.type;
+			// <ELIM> The sort is not stable, and the direct pass sums one emitter
+			// fixture's area lights as one contiguous run (fixture id bit-cast
+			// into inv_spot_attenuation), so fixtures are a secondary key.
+			// return type < p_light.type;
+			if (type != p_light.type || type != LIGHT_TYPE_AREA_POLY) {
+				return type < p_light.type;
+			}
+			uint32_t fixture = 0;
+			uint32_t other_fixture = 0;
+			memcpy(&fixture, &inv_spot_attenuation, sizeof(uint32_t));
+			memcpy(&other_fixture, &p_light.inv_spot_attenuation, sizeof(uint32_t));
+			return fixture < other_fixture;
+			// </ELIM>
 		}
 	};
 
