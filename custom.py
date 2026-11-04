@@ -11,6 +11,11 @@ module_csg_enabled = "no"
 # GridMap. TURNT does not use grid-based level authoring.
 module_gridmap_enabled = "no"
 
+# Jolt Physics. TURNT moves the player through libturnt's own swept-AABB trace
+# and runs on the Dummy 3D physics server; nothing steps or queries a physics
+# world. Godot Physics stays: it is the default for projects that set none.
+module_jolt_physics_enabled = "no"
+
 # BC6H encoders. Both modules are editor-only by default, so an export template
 # has no Image.COMPRESS_BPTC backend at all: the in-game map editor's bake hits
 # ERR_UNAVAILABLE and ships an uncompressed RGBH atlas ~6x larger than an editor

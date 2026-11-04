@@ -545,9 +545,6 @@ public:
 	struct MotionCollision {
 		Vector3 position;
 		Vector3 normal;
-		// <ELIM> Add surface normal to collision result
-		Vector3 surface_normal; // Actual geometry face normal (may differ from penetration normal on edges/corners)
-		// </ELIM>
 		Vector3 collider_velocity;
 		Vector3 collider_angular_velocity;
 		real_t depth = 0.0;
